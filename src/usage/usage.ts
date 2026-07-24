@@ -2,7 +2,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
   antigravityHeaders,
   endpointCandidates,
-  loadCodeAssist,
+  extractProjectId,
   parseApiKey,
   resolveProjectId,
 } from "../client/client.js";
@@ -267,15 +267,10 @@ function parseTier(value: unknown): TierInfo | undefined {
 
 export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsage> {
   const creds = parseApiKey(apiKeyRaw);
-  const warmedProject = await loadCodeAssist(creds.token);
-  const projectId = resolveProjectId({
-    token: creds.token,
-    warmedProject,
-    credentialProjectId: creds.projectId,
-  });
-  setLastProjectId(projectId);
 
-  const [assist, summary, available] = await Promise.all([
+  // Fetch loadCodeAssist and quota summary in parallel — reuse the single
+  // loadCodeAssist response for both project ID resolution and tier info.
+  const [assistResult, summary] = await Promise.all([
     postJson("/v1internal:loadCodeAssist", creds.token, {
       metadata: {
         ideType: "ANTIGRAVITY",
@@ -284,13 +279,23 @@ export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsag
       },
     }).catch(() => null),
     postJson("/v1internal:retrieveUserQuotaSummary", creds.token, {}),
-    fetchMergedAvailableModels(creds.token, projectId),
   ]);
+
+  // Derive project ID from the loadCodeAssist response we already have.
+  const discoveredProject = assistResult ? extractProjectId(assistResult.data) : undefined;
+  const projectId = resolveProjectId({
+    token: creds.token,
+    warmedProject: discoveredProject ?? null,
+    credentialProjectId: creds.projectId,
+  });
+  setLastProjectId(projectId);
+
+  const available = await fetchMergedAvailableModels(creds.token, projectId);
 
   const { groups, description } = parseQuotaSummary(summary.data);
   const { models, defaultAgentModelId } = parseModels(available.data);
 
-  const assistData = (isRecord(assist?.data) ? assist.data : {}) as LoadCodeAssistRaw;
+  const assistData = (isRecord(assistResult?.data) ? assistResult.data : {}) as LoadCodeAssistRaw;
   const productTier = parseTier(assistData.currentTier);
   const paidTier = parseTier(assistData.paidTier);
 

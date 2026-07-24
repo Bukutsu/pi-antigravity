@@ -23,6 +23,9 @@ export const ENDPOINT_FALLBACKS = [
 const PROJECT_CACHE_TTL_MS = 5 * 60 * 1000;
 const projectCache = new Map<string, { projectId: string | undefined; expiresAt: number }>();
 
+const MODEL_CACHE_TTL_MS = 10 * 60 * 1000;
+const modelCache = new Map<string, { result: DynamicModelInfo | undefined; expiresAt: number }>();
+
 /** UUID-shaped stable id from a seed (account email preferred over cwd). */
 export function stableProjectId(seed: string): string {
   const bytes = createHash("sha1").update(`antigravity:${seed}`).digest().subarray(0, 16);
@@ -284,7 +287,7 @@ function findDynamicModel(value: unknown, requestedId: string): DynamicModelInfo
   return undefined;
 }
 
-export async function fetchAvailableRuntimeModel(
+async function fetchAvailableRuntimeModelUncached(
   token: string,
   projectId: string,
   requestedRuntimeModel: string,
@@ -319,6 +322,32 @@ export async function fetchAvailableRuntimeModel(
   return undefined;
 }
 
+export async function fetchAvailableRuntimeModel(
+  token: string,
+  projectId: string,
+  requestedRuntimeModel: string,
+): Promise<DynamicModelInfo | undefined> {
+  const cacheKey = `${token}::${projectId}::${requestedRuntimeModel}`;
+  const cached = modelCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.result;
+
+  const result = await fetchAvailableRuntimeModelUncached(token, projectId, requestedRuntimeModel);
+  modelCache.set(cacheKey, { result, expiresAt: Date.now() + MODEL_CACHE_TTL_MS });
+
+  // Evict expired entries; bound map size to avoid unbounded growth.
+  if (modelCache.size > 64) {
+    const now = Date.now();
+    for (const [key, entry] of modelCache) {
+      if (entry.expiresAt <= now) modelCache.delete(key);
+    }
+  }
+  return result;
+}
+
+export function clearModelCache(): void {
+  modelCache.clear();
+}
+
 async function loadCodeAssistUncached(token: string): Promise<string | undefined> {
   const body = JSON.stringify({
     metadata: {
@@ -348,20 +377,23 @@ async function loadCodeAssistUncached(token: string): Promise<string | undefined
   return undefined;
 }
 
-/** Discover project id with a short in-memory cache keyed by access token. */
+/** Discover project id with a short in-memory LRU cache keyed by access token. */
 export async function loadCodeAssist(token: string): Promise<string | undefined> {
   const cached = projectCache.get(token);
-  if (cached && cached.expiresAt > Date.now()) return cached.projectId;
+  if (cached && cached.expiresAt > Date.now()) {
+    // Refresh LRU order: delete and re-insert so newest is at the end.
+    projectCache.delete(token);
+    projectCache.set(token, cached);
+    return cached.projectId;
+  }
 
   const projectId = await loadCodeAssistUncached(token);
   projectCache.set(token, { projectId, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
 
-  // Bound memory if tokens rotate frequently.
+  // Evict oldest entry when the cache exceeds 32 entries (O(1) — Map preserves insertion order).
   if (projectCache.size > 32) {
-    const now = Date.now();
-    for (const [key, entry] of projectCache) {
-      if (entry.expiresAt <= now) projectCache.delete(key);
-    }
+    const oldestKey = projectCache.keys().next().value;
+    if (oldestKey !== undefined) projectCache.delete(oldestKey);
   }
   return projectId;
 }

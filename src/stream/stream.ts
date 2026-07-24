@@ -506,10 +506,11 @@ async function streamResponse(
     if (result.done) break;
     if (!(result.value instanceof Uint8Array)) continue;
     buffer += decoder.decode(result.value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
 
-    for (const line of lines) {
+    let newlineIdx: number;
+    while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, newlineIdx);
+      buffer = buffer.slice(newlineIdx + 1);
       if (!line.startsWith("data:")) continue;
       const json = line.slice(5).trim();
       if (!json || json === "[DONE]") continue;
@@ -633,7 +634,8 @@ export function streamAntigravity(
     const output = createOutput(model);
     try {
       const creds = parseApiKey(opts.apiKey);
-      const warmedProject = await loadCodeAssist(creds.token);
+      // Skip loadCodeAssist roundtrip when credentials already carry a projectId.
+      const warmedProject = creds.projectId ? null : await loadCodeAssist(creds.token);
       const projectId = resolveProjectId({
         token: creds.token,
         warmedProject,

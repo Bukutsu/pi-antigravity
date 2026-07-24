@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.4] - 2026-07-23
+
+### Performance
+
+- Skip redundant `loadCodeAssist` HTTP call per inference when credentials already carry a project ID.
+- Cache `fetchAvailableRuntimeModel` results for 10 minutes, eliminating 2–6 repeated HTTP calls on every stream request.
+- Rewrite SSE stream parser to use index-based scanning instead of `split('\n')`, removing per-chunk array allocations.
+- Consolidate `loadCodeAssist` in `/antigravity.usage`: reuse a single response for both project ID resolution and tier info, and run quota summary fetch in parallel.
+- Replace O(n) `projectCache` eviction with O(1) LRU (insertion-order delete).
+
 ## [0.2.3] - 2026-07-23
 
 ### Fixed
