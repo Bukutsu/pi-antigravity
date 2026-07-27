@@ -85,14 +85,14 @@ Antigravity / Cloud Code Assist exposes a multi-provider catalog. Depending on y
 
 The backend's display labels do not always match its runtime IDs. For example, `gemini-3.5-flash-extra-low`, `gemini-3.5-flash-low`, and `gemini-3-flash-agent` can be displayed as Gemini 3.5 Flash Low, Medium, and High. Gemini 3.6 Flash uses explicit `gemini-3.6-flash-low|medium|high` runtime IDs (currently advertised on the daily/sandbox Cloud Code endpoint). The routing below uses the runtime IDs returned by the service.
 
-| Public model ID     | Input       | Thinking levels shown | Request routing                                                                                  |
-| ------------------- | ----------- | --------------------- | ------------------------------------------------------------------------------------------------ |
-| `gemini-3.6-flash`  | Text, image | Low, Medium, High     | low → `gemini-3.6-flash-low`; medium → `gemini-3.6-flash-medium`; high → `gemini-3.6-flash-high` |
-| `gemini-3.5-flash`  | Text, image | Low, Medium, High     | low → `gemini-3.5-flash-low`; medium → `gemini-3.5-flash-low`; high → `gemini-3-flash-agent`     |
-| `gemini-3.1-pro`    | Text, image | Low, High             | low → `gemini-3.1-pro-low`; high → `gemini-pro-agent`                                            |
-| `claude-sonnet-4-6` | Text, image | High                  | high → `claude-sonnet-4-6`                                                                       |
-| `claude-opus-4-6`   | Text, image | High                  | high → `claude-opus-4-6-thinking`                                                                |
-| `gpt-oss-120b`      | Text        | Medium                | medium → `gpt-oss-120b-medium`                                                                   |
+| Public model ID     | Input       | Thinking levels shown | Max output tokens | Request routing                                                                                  |
+| ------------------- | ----------- | --------------------- | ----------------- | ------------------------------------------------------------------------------------------------ |
+| `gemini-3.6-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.6-flash-low`; medium → `gemini-3.6-flash-medium`; high → `gemini-3.6-flash-high` |
+| `gemini-3.5-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.5-flash-low`; medium → `gemini-3.5-flash-low`; high → `gemini-3-flash-agent`     |
+| `gemini-3.1-pro`    | Text, image | Low, High             | 65,535            | low → `gemini-3.1-pro-low`; high → `gemini-pro-agent`                                            |
+| `claude-sonnet-4-6` | Text, image | High                  | 64,000            | high → `claude-sonnet-4-6`                                                                       |
+| `claude-opus-4-6`   | Text, image | High                  | 64,000            | high → `claude-opus-4-6-thinking`                                                                |
+| `gpt-oss-120b`      | Text        | Medium                | 32,768            | medium → `gpt-oss-120b-medium`                                                                   |
 
 To limit which models Pi cycles through, enable specific entries in `~/.pi/agent/settings.json`:
 

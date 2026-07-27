@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import type { Api, Context, Model, Tool } from "@earendil-works/pi-ai";
 import { defaultProjectId, stableProjectId } from "../src/client/index.js";
 import { StopReason } from "../src/types/enums.js";
-import { ANTIGRAVITY_MODELS, getAntigravityRequestModelId } from "../src/models/index.js";
+import { ANTIGRAVITY_MODELS, getMaxOutputTokens, getAntigravityRequestModelId } from "../src/models/index.js";
 import {
+  buildRequest,
   convertMessages,
   convertTools,
   friendlyAntigravityError,
@@ -225,6 +226,52 @@ assert.ok(
   ),
 );
 
+// Test max output token limits per runtime model
+assert.equal(getMaxOutputTokens("gemini-3.6-flash", "gemini-3.6-flash-low"), 65536);
+assert.equal(getMaxOutputTokens("gemini-3.1-pro", "gemini-3.1-pro-low"), 65535);
+assert.equal(getMaxOutputTokens("claude-sonnet-4-6", "claude-sonnet-4-6"), 64000);
+assert.equal(getMaxOutputTokens("gpt-oss-120b", "gpt-oss-120b-medium"), 32768);
+
+// Test buildRequest output token clamping
+const dummyContext: Context = {
+  messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+};
+
+// Case A: Omitted maxTokens -> uses model's max output token limit
+const reqA = buildRequest(model, dummyContext, "test-proj", {}, "claude-sonnet-4-6");
+assert.equal(reqA.request.generationConfig?.maxOutputTokens, 64000);
+
+// Case B: Oversized maxTokens (e.g. 100000) -> clamped to model ceiling
+const reqB = buildRequest(
+  model,
+  dummyContext,
+  "test-proj",
+  { maxTokens: 100000 },
+  "claude-sonnet-4-6",
+);
+assert.equal(reqB.request.generationConfig?.maxOutputTokens, 64000);
+
+// Case C: Small maxTokens (e.g. 2048) -> preserved
+const reqC = buildRequest(
+  model,
+  dummyContext,
+  "test-proj",
+  { maxTokens: 2048 },
+  "claude-sonnet-4-6",
+);
+assert.equal(reqC.request.generationConfig?.maxOutputTokens, 2048);
+
+// Case D: Gemini 3.1 Pro oversized (e.g. 65536) -> clamped to 65535
+const proModel = { ...model, id: "gemini-3.1-pro", maxTokens: 65535 };
+const reqD = buildRequest(
+  proModel,
+  dummyContext,
+  "test-proj",
+  { maxTokens: 65536 },
+  "gemini-3.1-pro-low",
+);
+assert.equal(reqD.request.generationConfig?.maxOutputTokens, 65535);
+
 console.log(
-  `model routing: ${routeCases.length} cases, tool schema, errors, project ids, and message conversion passed`,
+  `model routing: ${routeCases.length} cases, tool schema, errors, project ids, token clamping, and message conversion passed`,
 );

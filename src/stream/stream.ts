@@ -36,7 +36,7 @@ import {
   StopReason,
   ToolChoice,
 } from "../types/enums.js";
-import { getAntigravityRequestModelId, PROVIDER_ID } from "../models/models.js";
+import { getMaxOutputTokens, getAntigravityRequestModelId, PROVIDER_ID } from "../models/models.js";
 import { redactSecrets, safeError } from "../utils/security.js";
 import {
   ANTIGRAVITY_API,
@@ -304,7 +304,8 @@ function mapToolChoiceMode(
   return GeminiToolCallingMode.Auto;
 }
 
-function buildRequest(
+/** Exported for unit tests. */
+export function buildRequest(
   model: Model<Api>,
   context: Context,
   projectId: string,
@@ -326,8 +327,12 @@ function buildRequest(
 
   const generationConfig: GeminiGenerationConfig = {};
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature;
-  if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = options.maxTokens;
-  else generationConfig.maxOutputTokens = Math.min(8192, model.maxTokens || 8192);
+  const maxAllowed = getMaxOutputTokens(model.id, runtimeModel);
+  if (options.maxTokens !== undefined) {
+    generationConfig.maxOutputTokens = Math.min(options.maxTokens, maxAllowed);
+  } else {
+    generationConfig.maxOutputTokens = Math.min(maxAllowed, model.maxTokens || maxAllowed);
+  }
   if (Object.keys(generationConfig).length) request.generationConfig = generationConfig;
 
   const tools = convertTools(

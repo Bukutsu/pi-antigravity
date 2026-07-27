@@ -93,6 +93,47 @@ export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
   },
 };
 
+/**
+ * Verified maximum output tokens accepted by the Cloud Code Assist backend per model/runtime ID.
+ * Requesting more than these limits returns a 400 Bad Request from the API.
+ */
+export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
+  "gemini-3.6-flash": 65536,
+  "gemini-3.6-flash-low": 65536,
+  "gemini-3.6-flash-medium": 65536,
+  "gemini-3.6-flash-high": 65536,
+  "gemini-3.5-flash": 65536,
+  "gemini-3.5-flash-extra-low": 65536,
+  "gemini-3.5-flash-low": 65536,
+  "gemini-3-flash-agent": 65536,
+  "gemini-3.1-pro": 65535,
+  "gemini-3.1-pro-low": 65535,
+  "gemini-3.1-pro-high": 65535,
+  "gemini-pro-agent": 65535,
+  "claude-opus-4-6": 64000,
+  "claude-opus-4-6-thinking": 64000,
+  "claude-sonnet-4-6": 64000,
+  "gpt-oss-120b": 32768,
+  "gpt-oss-120b-medium": 32768,
+};
+
+export function getMaxOutputTokens(modelId: string, runtimeModel?: string): number {
+  if (runtimeModel && RUNTIME_MAX_OUTPUT_TOKENS[runtimeModel] !== undefined) {
+    return RUNTIME_MAX_OUTPUT_TOKENS[runtimeModel];
+  }
+  if (RUNTIME_MAX_OUTPUT_TOKENS[modelId] !== undefined) {
+    return RUNTIME_MAX_OUTPUT_TOKENS[modelId];
+  }
+  if (runtimeModel) {
+    if (runtimeModel.startsWith("claude-")) return 64000;
+    if (runtimeModel.startsWith("gpt-oss-")) return 32768;
+    if (runtimeModel.startsWith("gemini-3.1-pro") || runtimeModel === "gemini-pro-agent")
+      return 65535;
+    if (runtimeModel.startsWith("gemini-")) return 65536;
+  }
+  return 8192;
+}
+
 const freeCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 // A null entry is intentionally hidden by Pi. Do not collapse levels that happen to
