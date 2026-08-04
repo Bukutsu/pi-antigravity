@@ -136,6 +136,33 @@ assert.deepEqual(openObjectDecl?.parameters, {
   },
 });
 
+const nullableTool = {
+  name: "nullable_probe",
+  description: "OpenAPI-style nullable + type union that Claude bridge rejects.",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: ["string", "null"], nullable: true, format: "uri" },
+      mode: { type: "string", enum: ["a", "b"], default: "a" },
+    },
+    required: ["path"],
+    additionalProperties: false,
+  },
+} as Tool;
+const nullableDecl = convertTools([nullableTool], true)?.[0]?.functionDeclarations[0];
+assert.deepEqual(nullableDecl?.parameters, {
+  type: "object",
+  properties: {
+    path: { type: "string" },
+    mode: { type: "string", enum: ["a", "b"] },
+  },
+  required: ["path"],
+});
+assert.match(
+  friendlyAntigravityError(400, JSON.stringify({ error: { message: "Unknown name nullable" } })),
+  /Unknown name nullable/i,
+);
+
 assert.equal(mapStopReason("STOP"), StopReason.Stop);
 assert.equal(mapStopReason("MAX_TOKENS"), StopReason.Length);
 assert.equal(mapStopReason("OTHER"), StopReason.Error);

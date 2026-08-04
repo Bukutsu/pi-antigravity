@@ -188,67 +188,31 @@ function stripMetaSchema(schema: unknown): unknown {
 }
 
 /**
- * Keywords that Cloud Code Assist's protobuf `Schema` rejects with
- * `Unknown name "..."` when tools are sent via the Claude/GPT custom-tool bridge
- * (`parameters` field). Keep this list aggressive: Pi still validates tool args
- * after the model calls them, so a slightly looser declaration is preferable to
- * a hard 400 on every Claude/GPT request.
+ * Protobuf `Schema` fields accepted by Cloud Code Assist's Claude/GPT custom-tool
+ * bridge (`parameters` field). Anything else — `nullable`, `anyOf`, `format`,
+ * `$ref`, etc. — returns `Unknown name "..."` / Invalid JSON payload (400).
+ * Allowlist rather than denylist so new JSON Schema keywords cannot 400 the request.
+ * Pi still validates tool args after the model calls them.
  */
-const CUSTOM_TOOL_SCHEMA_OMIT = new Set([
-  "anyOf",
-  "oneOf",
-  "allOf",
-  "not",
-  "if",
-  "then",
-  "else",
-  "$schema",
-  "$id",
-  "$anchor",
-  "$dynamicAnchor",
-  "$vocabulary",
-  "$comment",
-  "$defs",
-  "$ref",
-  "$dynamicRef",
-  "definitions",
-  "patternProperties",
-  "additionalProperties",
-  "unevaluatedProperties",
-  "propertyNames",
-  "dependentSchemas",
-  "dependentRequired",
-  "prefixItems",
-  "unevaluatedItems",
-  "contains",
-  "minContains",
-  "maxContains",
-  "uniqueItems",
-  "const",
-  "default",
-  "examples",
-  "example",
-  "title",
-  "readOnly",
-  "writeOnly",
-  "deprecated",
-  "contentMediaType",
-  "contentEncoding",
-  "contentSchema",
-  "maxLength",
-  "minLength",
-  "maxItems",
-  "minItems",
-  "maximum",
-  "minimum",
-  "exclusiveMaximum",
-  "exclusiveMinimum",
-  "multipleOf",
-  "maxProperties",
-  "minProperties",
-  "pattern",
-  "format",
+const CUSTOM_TOOL_SCHEMA_ALLOW = new Set([
+  "type",
+  "description",
+  "properties",
+  "required",
+  "items",
+  "enum",
 ]);
+
+function normalizeCustomToolType(value: unknown): unknown {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return undefined;
+  // JSON Schema union types like ["string","null"] → first non-null scalar type.
+  const entries = value as unknown[];
+  const scalar = entries.find(
+    (entry): entry is string => typeof entry === "string" && entry !== "null",
+  );
+  return scalar;
+}
 
 function normalizeCustomToolSchema(schema: unknown): unknown {
   if (!schema || typeof schema !== "object") return schema;
@@ -256,7 +220,21 @@ function normalizeCustomToolSchema(schema: unknown): unknown {
 
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(schema)) {
-    if (CUSTOM_TOOL_SCHEMA_OMIT.has(key) || key.startsWith("$")) continue;
+    if (!CUSTOM_TOOL_SCHEMA_ALLOW.has(key)) continue;
+    if (key === "type") {
+      const normalizedType = normalizeCustomToolType(value);
+      if (normalizedType !== undefined) out.type = normalizedType;
+      continue;
+    }
+    if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
+      // Property names are user-defined, not Schema keywords — never allowlist-filter them.
+      const props: Record<string, unknown> = {};
+      for (const [propName, propSchema] of Object.entries(value as Record<string, unknown>)) {
+        props[propName] = normalizeCustomToolSchema(propSchema);
+      }
+      out.properties = props;
+      continue;
+    }
     if (
       key === "enum" &&
       Array.isArray(value) &&
@@ -389,10 +367,10 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
       return "Antigravity login expired or credentials are invalid. Next: run /login antigravity, then retry.";
     }
     if (/Invalid JSON payload|Unknown name/i.test(msg)) {
-      return "Antigravity request format was rejected by the backend. Next: switch to a simpler model or retry after updating the extension.";
+      return `Antigravity request format was rejected by the backend (${msg}). Next: switch to a simpler model or retry after updating the extension.`;
     }
     if (/Request contains an invalid argument/i.test(msg)) {
-      return "Antigravity rejected this request. Next: retry once; if it keeps failing, switch models or re-login.";
+      return `Antigravity rejected this request (${msg}). Next: retry once; if it keeps failing, switch models or re-login.`;
     }
     return `Bad request from Antigravity. Next: retry once, then run /login antigravity if it keeps failing. Backend said: ${msg}`;
   }
