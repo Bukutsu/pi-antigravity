@@ -45,6 +45,9 @@ const schemaProbeTool = {
 } as Tool;
 
 const modelCases = [
+  { label: "Gemini 3.7 Flash (Low)", modelId: "gemini-3.7-flash", effort: "low" },
+  { label: "Gemini 3.7 Flash (Medium)", modelId: "gemini-3.7-flash", effort: "medium" },
+  { label: "Gemini 3.7 Flash (High)", modelId: "gemini-3.7-flash", effort: "high" },
   { label: "Gemini 3.6 Flash (Low)", modelId: "gemini-3.6-flash", effort: "low" },
   { label: "Gemini 3.6 Flash (Medium)", modelId: "gemini-3.6-flash", effort: "medium" },
   { label: "Gemini 3.6 Flash (High)", modelId: "gemini-3.6-flash", effort: "high" },

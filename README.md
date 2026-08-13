@@ -36,7 +36,7 @@ Restart Pi (or run `/reload`) after installation. To update the npm package late
 3. Select a model, for example:
 
    ```text
-   /model antigravity/gemini-3.6-flash
+   /model antigravity/gemini-3.7-flash
    ```
 
 4. Start working. Use `/antigravity.doctor` if a request fails.
@@ -77,16 +77,17 @@ Model availability, entitlement, quota groups, and resets are returned by the se
 
 The static model IDs registered by this extension match the Antigravity CLI catalog (`agy models`). Use `/antigravity.models` to see live availability and quota for your account.
 
-`agy models` currently lists eleven display entries (3.6 Flash Low/Medium/High, 3.5 Flash Low/Medium/High, Pro Low/High, Claude Sonnet/Opus Thinking, GPT-OSS Medium). Pi collapses those into six public model IDs while only showing each model's advertised thinking level(s).
+`agy models` advertises display entries across Gemini Flash (3.7, 3.6, 3.5), Gemini Pro, Claude Sonnet/Opus Thinking, and GPT-OSS Medium. Pi collapses those into seven public model IDs while only showing each model's advertised thinking level(s).
 
 ### Why Claude and GPT-OSS appear
 
 Antigravity / Cloud Code Assist exposes a multi-provider catalog. Depending on your account, its Google-authenticated API can advertise Google Gemini models alongside Claude models served through Anthropic Vertex and GPT-OSS served through OpenAI Vertex. This extension intentionally exposes those advertised Claude and GPT-OSS models through the single `antigravity` provider; they are not separate Pi providers and do not use a separate Anthropic or OpenAI login.
 
-The backend's display labels do not always match its runtime IDs. For example, `gemini-3.5-flash-extra-low`, `gemini-3.5-flash-low`, and `gemini-3-flash-agent` can be displayed as Gemini 3.5 Flash Low, Medium, and High. Gemini 3.6 Flash uses explicit `gemini-3.6-flash-low|medium|high` runtime IDs (currently advertised on the daily/sandbox Cloud Code endpoint). The routing below uses the runtime IDs returned by the service.
+The backend's display labels do not always match its runtime IDs. For example, `gemini-3.5-flash-extra-low`, `gemini-3.5-flash-low`, and `gemini-3-flash-agent` can be displayed as Gemini 3.5 Flash Low, Medium, and High. Gemini 3.7 Flash and 3.6 Flash use explicit `gemini-3.7-flash-low|medium|high` and `gemini-3.6-flash-low|medium|high` runtime IDs. The routing below uses the runtime IDs returned by the service.
 
 | Public model ID     | Input       | Thinking levels shown | Max output tokens | Request routing                                                                                  |
 | ------------------- | ----------- | --------------------- | ----------------- | ------------------------------------------------------------------------------------------------ |
+| `gemini-3.7-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.7-flash-low`; medium → `gemini-3.7-flash-medium`; high → `gemini-3.7-flash-high` |
 | `gemini-3.6-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.6-flash-low`; medium → `gemini-3.6-flash-medium`; high → `gemini-3.6-flash-high` |
 | `gemini-3.5-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.5-flash-low`; medium → `gemini-3.5-flash-low`; high → `gemini-3-flash-agent`     |
 | `gemini-3.1-pro`    | Text, image | Low, High             | 65,535            | low → `gemini-3.1-pro-low`; high → `gemini-pro-agent`                                            |
@@ -99,6 +100,7 @@ To limit which models Pi cycles through, enable specific entries in `~/.pi/agent
 ```json
 {
   "models": {
+    "antigravity/gemini-3.7-flash": { "enabled": true },
     "antigravity/gemini-3.6-flash": { "enabled": true },
     "antigravity/gemini-3.5-flash": { "enabled": true },
     "antigravity/gemini-3.1-pro": { "enabled": true },

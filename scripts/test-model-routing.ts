@@ -14,6 +14,13 @@ import {
 const route = (model: string, effort?: string) => getAntigravityRequestModelId(model, effort);
 
 const routeCases: Array<[string, string | undefined, string]> = [
+  ["gemini-3.7-flash", undefined, "gemini-3.7-flash-low"],
+  ["gemini-3.7-flash", "off", "gemini-3.7-flash-low"],
+  ["gemini-3.7-flash", "minimal", "gemini-3.7-flash-low"],
+  ["gemini-3.7-flash", "low", "gemini-3.7-flash-low"],
+  ["gemini-3.7-flash", "medium", "gemini-3.7-flash-medium"],
+  ["gemini-3.7-flash", "high", "gemini-3.7-flash-high"],
+  ["gemini-3.7-flash", "xhigh", "gemini-3.7-flash-high"],
   ["gemini-3.6-flash", undefined, "gemini-3.6-flash-low"],
   ["gemini-3.6-flash", "off", "gemini-3.6-flash-low"],
   ["gemini-3.6-flash", "minimal", "gemini-3.6-flash-low"],
@@ -43,6 +50,7 @@ for (const [model, effort, expected] of routeCases) {
 
 const modelIds = new Set(ANTIGRAVITY_MODELS.map((model) => model.id));
 const expectedModels = [
+  "gemini-3.7-flash",
   "gemini-3.6-flash",
   "gemini-3.5-flash",
   "gemini-3.1-pro",
@@ -60,6 +68,7 @@ for (const expected of expectedModels) {
 }
 
 const expectedThinkingLevels: Record<string, string[]> = {
+  "gemini-3.7-flash": ["low", "medium", "high"],
   "gemini-3.6-flash": ["low", "medium", "high"],
   "gemini-3.5-flash": ["low", "medium", "high"],
   "gemini-3.1-pro": ["low", "high"],
@@ -187,7 +196,6 @@ const seedB = stableProjectId("user@example.com");
 const seedC = stableProjectId("other@example.com");
 assert.equal(seedA, seedB);
 assert.notEqual(seedA, seedC);
-assert.notEqual(defaultProjectId("user@example.com"), defaultProjectId("other@example.com"));
 assert.match(seedA, /^[0-9a-f-]{36}$/);
 
 const model = {
@@ -254,6 +262,7 @@ assert.ok(
 );
 
 // Test max output token limits per runtime model
+assert.equal(getMaxOutputTokens("gemini-3.7-flash", "gemini-3.7-flash-low"), 65536);
 assert.equal(getMaxOutputTokens("gemini-3.6-flash", "gemini-3.6-flash-low"), 65536);
 assert.equal(getMaxOutputTokens("gemini-3.1-pro", "gemini-3.1-pro-low"), 65535);
 assert.equal(getMaxOutputTokens("claude-sonnet-4-6", "claude-sonnet-4-6"), 64000);

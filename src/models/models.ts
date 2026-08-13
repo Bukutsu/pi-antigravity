@@ -9,6 +9,7 @@ export const PROVIDER_NAME = "Antigravity";
  * Public selectable model IDs → backend request model IDs by thinking effort.
  *
  * Catalog mirrors `agy models` (Antigravity CLI), which currently advertises:
+ * - Gemini 3.7 Flash (Low / Medium / High)
  * - Gemini 3.6 Flash (Low / Medium / High)
  * - Gemini 3.5 Flash (Low / Medium / High)
  * - Gemini 3.1 Pro (Low / High)
@@ -19,7 +20,7 @@ export const PROVIDER_NAME = "Antigravity";
  * Pi exposes those as public model IDs and only surfaces the exact thinking levels
  * advertised by the backend for each model.
  *
- * Note: Gemini 3.6 Flash runtime IDs are currently served on the daily/sandbox Cloud Code
+ * Note: Gemini 3.7 Flash and 3.6 Flash runtime IDs are currently served on the daily/sandbox Cloud Code
  * endpoint first; streamGenerateContent falls through on 404 from production.
  */
 export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
@@ -56,6 +57,18 @@ export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
       xhigh: "gemini-pro-agent",
     },
     defaultRequestId: "gemini-3.1-pro-low",
+  },
+  "gemini-3.7-flash": {
+    // agy models: gemini-3.7-flash-low / -medium / -high
+    off: "gemini-3.7-flash-low",
+    routing: {
+      minimal: "gemini-3.7-flash-low",
+      low: "gemini-3.7-flash-low",
+      medium: "gemini-3.7-flash-medium",
+      high: "gemini-3.7-flash-high",
+      xhigh: "gemini-3.7-flash-high",
+    },
+    defaultRequestId: "gemini-3.7-flash-low",
   },
   "gemini-3.6-flash": {
     // agy models: gemini-3.6-flash-low / -medium / -high
@@ -98,6 +111,10 @@ export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
  * Requesting more than these limits returns a 400 Bad Request from the API.
  */
 export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
+  "gemini-3.7-flash": 65536,
+  "gemini-3.7-flash-low": 65536,
+  "gemini-3.7-flash-medium": 65536,
+  "gemini-3.7-flash-high": 65536,
   "gemini-3.6-flash": 65536,
   "gemini-3.6-flash-low": 65536,
   "gemini-3.6-flash-medium": 65536,
@@ -179,6 +196,16 @@ const thinkingLevelMaps = {
 
 /** Same set as `agy models`, collapsed to public Pi model IDs. */
 export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
+  {
+    id: "gemini-3.7-flash",
+    name: "Gemini 3.7 Flash (Antigravity)",
+    reasoning: true,
+    thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
+    input: ["text", "image"],
+    cost: freeCost,
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
   {
     id: "gemini-3.6-flash",
     name: "Gemini 3.6 Flash (Antigravity)",

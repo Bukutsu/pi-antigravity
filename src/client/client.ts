@@ -198,12 +198,18 @@ export function isUsableRuntimeModelId(id: string): boolean {
 function buildModelMatchRegex(requestedId: string): RegExp {
   const req = requestedId.toLowerCase();
   // Display names from fetchAvailableModels (keys are the real runtime ids):
+  //   gemini-3.7-flash-low       → "Gemini 3.7 Flash (Low)"
+  //   gemini-3.7-flash-medium    → "Gemini 3.7 Flash (Medium)"
+  //   gemini-3.7-flash-high      → "Gemini 3.7 Flash (High)"
   //   gemini-3.6-flash-low       → "Gemini 3.6 Flash (Low)"
   //   gemini-3.6-flash-medium    → "Gemini 3.6 Flash (Medium)"
   //   gemini-3.6-flash-high      → "Gemini 3.6 Flash (High)"
   //   gemini-3.5-flash-extra-low → "Gemini 3.5 Flash (Low)"
   //   gemini-3.5-flash-low       → "Gemini 3.5 Flash (Medium)"
   //   gemini-3-flash-agent       → "Gemini 3.5 Flash (High)"
+  if (req === "gemini-3.7-flash-low") return /gemini[- ]3\.7[- ]flash \(low\)/i;
+  if (req === "gemini-3.7-flash-medium") return /gemini[- ]3\.7[- ]flash \(medium\)/i;
+  if (req === "gemini-3.7-flash-high") return /gemini[- ]3\.7[- ]flash \(high\)/i;
   if (req === "gemini-3.6-flash-low") return /gemini[- ]3\.6[- ]flash \(low\)/i;
   if (req === "gemini-3.6-flash-medium") return /gemini[- ]3\.6[- ]flash \(medium\)/i;
   if (req === "gemini-3.6-flash-high") return /gemini[- ]3\.6[- ]flash \(high\)/i;
