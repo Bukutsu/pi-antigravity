@@ -299,3 +299,17 @@ export function getAntigravityRequestModelId(modelId: string, effort: string | u
     modelId
   );
 }
+
+/**
+ * If a next-gen model (e.g. Gemini 3.7 Flash) is not yet available on the backend,
+ * provide a fallback runtime model ID (e.g. Gemini 3.6 Flash) to maintain availability.
+ */
+export function getFallbackRuntimeModel(runtimeModel: string): string | undefined {
+  if (runtimeModel.startsWith("gemini-3.7-flash-")) {
+    return runtimeModel.replace("gemini-3.7-flash-", "gemini-3.6-flash-");
+  }
+  if (runtimeModel === "gemini-3.7-flash") {
+    return "gemini-3.6-flash-low";
+  }
+  return undefined;
+}

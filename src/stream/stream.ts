@@ -36,7 +36,12 @@ import {
   StopReason,
   ToolChoice,
 } from "../types/enums.js";
-import { getMaxOutputTokens, getAntigravityRequestModelId, PROVIDER_ID } from "../models/models.js";
+import {
+  getMaxOutputTokens,
+  getAntigravityRequestModelId,
+  getFallbackRuntimeModel,
+  PROVIDER_ID,
+} from "../models/models.js";
 import { redactSecrets, safeError } from "../utils/security.js";
 import {
   ANTIGRAVITY_API,
@@ -633,13 +638,16 @@ export function streamAntigravity(
       const dynamic = await fetchAvailableRuntimeModel(creds.token, projectId, baseRuntimeModel);
       // Catalog values often include MODEL_PLACEHOLDER_* enums that 404 on stream;
       // only adopt dynamic ids that look like real runtime model ids.
-      const runtimeModel =
+      const initialRuntimeModel =
         dynamic?.id && /^(gemini-|claude-|gpt-oss-)/i.test(dynamic.id)
           ? dynamic.id
           : baseRuntimeModel;
-      setLastResolvedRuntimeModel(runtimeModel);
 
-      const body = JSON.stringify(buildRequest(model, context, projectId, opts, runtimeModel));
+      const runtimeCandidates = [initialRuntimeModel];
+      const fallback = getFallbackRuntimeModel(initialRuntimeModel);
+      if (fallback && fallback !== initialRuntimeModel) {
+        runtimeCandidates.push(fallback);
+      }
 
       const isClaudeReasoning = model.id.startsWith("claude-") && model.reasoning;
       const requestHeaders: Record<string, string> = {
@@ -650,6 +658,7 @@ export function streamAntigravity(
       let response: Response | undefined;
       let lastText = "";
       let received = false;
+      let runtimeModel = initialRuntimeModel;
 
       for (let emptyAttempt = 0; emptyAttempt <= 2; emptyAttempt++) {
         if (opts.signal?.aborted) throw new Error("Request was aborted");
@@ -658,25 +667,40 @@ export function streamAntigravity(
           await new Promise((res) => setTimeout(res, delay));
         }
 
-        for (const endpoint of endpointCandidates()) {
-          setLastEndpoint(endpoint);
-          response = await fetch(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-            method: "POST",
-            headers: requestHeaders,
-            body,
-            signal: opts.signal,
-          });
-          setLastStatus(response.status);
-          if (response.ok) break;
-          lastText = await response.text();
-          if (response.status === 429 && /Individual quota reached/i.test(lastText)) break;
-          if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break;
+        for (let candIdx = 0; candIdx < runtimeCandidates.length; candIdx++) {
+          runtimeModel = runtimeCandidates[candIdx]!;
+          setLastResolvedRuntimeModel(runtimeModel);
+          const body = JSON.stringify(buildRequest(model, context, projectId, opts, runtimeModel));
+
+          for (const endpoint of endpointCandidates()) {
+            setLastEndpoint(endpoint);
+            response = await fetch(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+              method: "POST",
+              headers: requestHeaders,
+              body,
+              signal: opts.signal,
+            });
+            setLastStatus(response.status);
+            if (response.ok) break;
+            lastText = await response.text();
+            if (response.status === 429 && /Individual quota reached/i.test(lastText)) break;
+            if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break;
+          }
+
+          if (response?.ok) break;
+          if (response?.status === 404 && candIdx + 1 < runtimeCandidates.length) {
+            continue;
+          }
+          break;
         }
 
         if (!response || !response.ok) {
           if (antigravityEnv("DEBUG_DUMP") === "1") {
             try {
               const { writeFileSync } = await import("node:fs");
+              const body = JSON.stringify(
+                buildRequest(model, context, projectId, opts, runtimeModel),
+              );
               let parsedBody: unknown = body;
               try {
                 parsedBody = JSON.parse(body) as unknown;

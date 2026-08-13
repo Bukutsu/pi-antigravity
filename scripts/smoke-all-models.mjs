@@ -118,46 +118,58 @@ function parseSseText(text) {
 }
 
 async function smokeOne(publicId) {
-  const runtimeModel = models.getAntigravityRequestModelId(publicId, "off");
-  const isClaude = publicId.startsWith("claude-") || runtimeModel.startsWith("claude-");
-  const body = {
-    project: projectId,
-    model: runtimeModel,
-    request: {
-      contents: [{ role: "user", parts: [{ text: PROMPT }] }],
-      generationConfig: { maxOutputTokens: 256 },
-    },
-    requestType: "agent",
-    userAgent: "antigravity",
-    requestId: utils.nowRequestId(),
-  };
-
-  const headers = {
-    ...client.antigravityHeaders(refreshed.access),
-    ...(isClaude ? { "anthropic-beta": "interleaved-thinking-2025-05-14" } : {}),
-  };
+  const initialRuntimeModel = models.getAntigravityRequestModelId(publicId, "off");
+  const candidates = [initialRuntimeModel];
+  const fallback = models.getFallbackRuntimeModel?.(initialRuntimeModel);
+  if (fallback && fallback !== initialRuntimeModel) candidates.push(fallback);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   const started = Date.now();
+  let runtimeModel = initialRuntimeModel;
   try {
-    // Mirror stream.ts: try production then daily/sandbox; fall through on 404/5xx.
     let res;
     let text = "";
     let usedEndpoint = endpoint;
-    for (const ep of client.endpointCandidates()) {
-      usedEndpoint = ep;
-      res = await fetch(`${ep}/v1internal:streamGenerateContent?alt=sse`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      if (res.ok) break;
-      text = await res.text();
-      if (res.status === 429 && /Individual quota reached/i.test(text)) break;
-      if (![403, 404, 429, 500, 502, 503, 504].includes(res.status)) break;
+
+    for (let i = 0; i < candidates.length; i++) {
+      runtimeModel = candidates[i];
+      const isClaude = publicId.startsWith("claude-") || runtimeModel.startsWith("claude-");
+      const body = {
+        project: projectId,
+        model: runtimeModel,
+        request: {
+          contents: [{ role: "user", parts: [{ text: PROMPT }] }],
+          generationConfig: { maxOutputTokens: 256 },
+        },
+        requestType: "agent",
+        userAgent: "antigravity",
+        requestId: utils.nowRequestId(),
+      };
+
+      const headers = {
+        ...client.antigravityHeaders(refreshed.access),
+        ...(isClaude ? { "anthropic-beta": "interleaved-thinking-2025-05-14" } : {}),
+      };
+
+      for (const ep of client.endpointCandidates()) {
+        usedEndpoint = ep;
+        res = await fetch(`${ep}/v1internal:streamGenerateContent?alt=sse`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+        if (res.ok) break;
+        text = await res.text();
+        if (res.status === 429 && /Individual quota reached/i.test(text)) break;
+        if (![403, 404, 429, 500, 502, 503, 504].includes(res.status)) break;
+      }
+      if (res?.ok) break;
+      if (res?.status === 404 && i + 1 < candidates.length) continue;
+      break;
     }
+
     const ms = Date.now() - started;
     if (!res || !res.ok) {
       return {

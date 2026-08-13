@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import type { Api, Context, Model, Tool } from "@earendil-works/pi-ai";
 import { defaultProjectId, stableProjectId } from "../src/client/index.js";
 import { StopReason } from "../src/types/enums.js";
-import { ANTIGRAVITY_MODELS, getMaxOutputTokens, getAntigravityRequestModelId } from "../src/models/index.js";
+import {
+  ANTIGRAVITY_MODELS,
+  getMaxOutputTokens,
+  getAntigravityRequestModelId,
+  getFallbackRuntimeModel,
+} from "../src/models/index.js";
 import {
   buildRequest,
   convertMessages,
@@ -267,6 +272,14 @@ assert.equal(getMaxOutputTokens("gemini-3.6-flash", "gemini-3.6-flash-low"), 655
 assert.equal(getMaxOutputTokens("gemini-3.1-pro", "gemini-3.1-pro-low"), 65535);
 assert.equal(getMaxOutputTokens("claude-sonnet-4-6", "claude-sonnet-4-6"), 64000);
 assert.equal(getMaxOutputTokens("gpt-oss-120b", "gpt-oss-120b-medium"), 32768);
+
+// Test fallback runtime models
+assert.equal(getFallbackRuntimeModel("gemini-3.7-flash-low"), "gemini-3.6-flash-low");
+assert.equal(getFallbackRuntimeModel("gemini-3.7-flash-medium"), "gemini-3.6-flash-medium");
+assert.equal(getFallbackRuntimeModel("gemini-3.7-flash-high"), "gemini-3.6-flash-high");
+assert.equal(getFallbackRuntimeModel("gemini-3.7-flash"), "gemini-3.6-flash-low");
+assert.equal(getFallbackRuntimeModel("gemini-3.6-flash-low"), undefined);
+assert.equal(getFallbackRuntimeModel("claude-sonnet-4-6"), undefined);
 
 // Test buildRequest output token clamping
 const dummyContext: Context = {
