@@ -2,6 +2,7 @@
  * Live smoke: hit every registered public model with a tiny prompt.
  * Usage: node --import tsx scripts/smoke-all-models.mjs
  *        FILTER=gemini-3.5-flash node --import tsx scripts/smoke-all-models.mjs
+ *        FILTER=gemini-3.7-flash EFFORT=high node --import tsx scripts/smoke-all-models.mjs
  *        CONCURRENCY=2 TIMEOUT_MS=45000 node --import tsx scripts/smoke-all-models.mjs
  */
 import { readFileSync, writeFileSync } from "node:fs";
@@ -33,6 +34,7 @@ const models = await import(pathToFileURL(join(root, "src/models/models.ts")).hr
 const CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 2));
 const TIMEOUT_MS = Math.max(5000, Number(process.env.TIMEOUT_MS || 60_000));
 const FILTER = (process.env.FILTER || "").trim();
+const EFFORT = (process.env.EFFORT || "off").trim().toLowerCase();
 const PROMPT = process.env.PROMPT || "Reply with exactly one word: pong";
 
 console.log(`email=${creds.email || "none"} projectId(auth)=${creds.projectId || "none"}`);
@@ -118,9 +120,9 @@ function parseSseText(text) {
 }
 
 async function smokeOne(publicId) {
-  const initialRuntimeModel = models.getAntigravityRequestModelId(publicId, "off");
+  const initialRuntimeModel = models.getAntigravityRequestModelId(publicId, EFFORT);
   const candidates = [initialRuntimeModel];
-  const fallback = models.getFallbackRuntimeModel?.(initialRuntimeModel);
+  const fallback = models.getFallbackRuntimeModel?.(initialRuntimeModel, EFFORT);
   if (fallback && fallback !== initialRuntimeModel) candidates.push(fallback);
 
   const controller = new AbortController();
@@ -135,12 +137,23 @@ async function smokeOne(publicId) {
     for (let i = 0; i < candidates.length; i++) {
       runtimeModel = candidates[i];
       const isClaude = publicId.startsWith("claude-") || runtimeModel.startsWith("claude-");
+      const generationConfig = { maxOutputTokens: 256 };
+      if (runtimeModel === "gemini-3.7-flash-tiered") {
+        generationConfig.thinkingConfig = {
+          thinkingLevel:
+            EFFORT === "high" || EFFORT === "xhigh"
+              ? "HIGH"
+              : EFFORT === "medium"
+                ? "MEDIUM"
+                : "LOW",
+        };
+      }
       const body = {
         project: projectId,
         model: runtimeModel,
         request: {
           contents: [{ role: "user", parts: [{ text: PROMPT }] }],
-          generationConfig: { maxOutputTokens: 256 },
+          generationConfig,
         },
         requestType: "agent",
         userAgent: "antigravity",
@@ -259,6 +272,7 @@ writeFileSync(
       endpoint,
       availableRuntimeModels: availableIds,
       concurrency: CONCURRENCY,
+      effort: EFFORT,
       timeoutMs: TIMEOUT_MS,
       results,
       summary: { total: results.length, passed: passed.length, failed: failed.length },

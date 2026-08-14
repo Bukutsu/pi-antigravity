@@ -11,6 +11,7 @@ export const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 export const TOKEN_URL = "https://oauth2.googleapis.com/token";
 export const OAUTH_CALLBACK_TIMEOUT_MS = 5 * 60 * 1000;
 export const SCOPES = [
+  "https://www.googleapis.com/auth/aicode",
   "https://www.googleapis.com/auth/cloud-platform",
   "https://www.googleapis.com/auth/userinfo.email",
   "https://www.googleapis.com/auth/userinfo.profile",

@@ -19,13 +19,13 @@ import {
 const route = (model: string, effort?: string) => getAntigravityRequestModelId(model, effort);
 
 const routeCases: Array<[string, string | undefined, string]> = [
-  ["gemini-3.7-flash", undefined, "gemini-3.7-flash-low"],
-  ["gemini-3.7-flash", "off", "gemini-3.7-flash-low"],
-  ["gemini-3.7-flash", "minimal", "gemini-3.7-flash-low"],
-  ["gemini-3.7-flash", "low", "gemini-3.7-flash-low"],
-  ["gemini-3.7-flash", "medium", "gemini-3.7-flash-medium"],
-  ["gemini-3.7-flash", "high", "gemini-3.7-flash-high"],
-  ["gemini-3.7-flash", "xhigh", "gemini-3.7-flash-high"],
+  ["gemini-3.7-flash", undefined, "gemini-3.7-flash-tiered"],
+  ["gemini-3.7-flash", "off", "gemini-3.7-flash-tiered"],
+  ["gemini-3.7-flash", "minimal", "gemini-3.7-flash-tiered"],
+  ["gemini-3.7-flash", "low", "gemini-3.7-flash-tiered"],
+  ["gemini-3.7-flash", "medium", "gemini-3.7-flash-tiered"],
+  ["gemini-3.7-flash", "high", "gemini-3.7-flash-tiered"],
+  ["gemini-3.7-flash", "xhigh", "gemini-3.7-flash-tiered"],
   ["gemini-3.6-flash", undefined, "gemini-3.6-flash-low"],
   ["gemini-3.6-flash", "off", "gemini-3.6-flash-low"],
   ["gemini-3.6-flash", "minimal", "gemini-3.6-flash-low"],
@@ -267,7 +267,7 @@ assert.ok(
 );
 
 // Test max output token limits per runtime model
-assert.equal(getMaxOutputTokens("gemini-3.7-flash", "gemini-3.7-flash-low"), 65536);
+assert.equal(getMaxOutputTokens("gemini-3.7-flash", "gemini-3.7-flash-tiered"), 65536);
 assert.equal(getMaxOutputTokens("gemini-3.6-flash", "gemini-3.6-flash-low"), 65536);
 assert.equal(getMaxOutputTokens("gemini-3.1-pro", "gemini-3.1-pro-low"), 65535);
 assert.equal(getMaxOutputTokens("claude-sonnet-4-6", "claude-sonnet-4-6"), 64000);
@@ -277,6 +277,10 @@ assert.equal(getMaxOutputTokens("gpt-oss-120b", "gpt-oss-120b-medium"), 32768);
 assert.equal(getFallbackRuntimeModel("gemini-3.7-flash-low"), "gemini-3.6-flash-low");
 assert.equal(getFallbackRuntimeModel("gemini-3.7-flash-medium"), "gemini-3.6-flash-medium");
 assert.equal(getFallbackRuntimeModel("gemini-3.7-flash-high"), "gemini-3.6-flash-high");
+assert.equal(
+  getFallbackRuntimeModel("gemini-3.7-flash-tiered", "medium"),
+  "gemini-3.6-flash-medium",
+);
 assert.equal(getFallbackRuntimeModel("gemini-3.7-flash"), "gemini-3.6-flash-low");
 assert.equal(getFallbackRuntimeModel("gemini-3.6-flash-low"), undefined);
 assert.equal(getFallbackRuntimeModel("claude-sonnet-4-6"), undefined);
@@ -320,6 +324,23 @@ const reqD = buildRequest(
   "gemini-3.1-pro-low",
 );
 assert.equal(reqD.request.generationConfig?.maxOutputTokens, 65535);
+
+// Case E: Gemini 3.7 uses its tiered runtime and sends effort in thinkingConfig.
+const flash37Model = { ...model, id: "gemini-3.7-flash", maxTokens: 65536 };
+for (const [reasoning, thinkingLevel] of [
+  ["low", "LOW"],
+  ["medium", "MEDIUM"],
+  ["high", "HIGH"],
+] as const) {
+  const request = buildRequest(
+    flash37Model,
+    dummyContext,
+    "test-proj",
+    { reasoning },
+    "gemini-3.7-flash-tiered",
+  );
+  assert.equal(request.request.generationConfig?.thinkingConfig?.thinkingLevel, thinkingLevel);
+}
 
 console.log(
   `model routing: ${routeCases.length} cases, tool schema, errors, project ids, token clamping, and message conversion passed`,

@@ -83,11 +83,11 @@ The static model IDs registered by this extension match the Antigravity CLI cata
 
 Antigravity / Cloud Code Assist exposes a multi-provider catalog. Depending on your account, its Google-authenticated API can advertise Google Gemini models alongside Claude models served through Anthropic Vertex and GPT-OSS served through OpenAI Vertex. This extension intentionally exposes those advertised Claude and GPT-OSS models through the single `antigravity` provider; they are not separate Pi providers and do not use a separate Anthropic or OpenAI login.
 
-The backend's display labels do not always match its runtime IDs. For example, `gemini-3.5-flash-extra-low`, `gemini-3.5-flash-low`, and `gemini-3-flash-agent` can be displayed as Gemini 3.5 Flash Low, Medium, and High. Gemini 3.7 Flash and 3.6 Flash use explicit `gemini-3.7-flash-low|medium|high` and `gemini-3.6-flash-low|medium|high` runtime IDs. The routing below uses the runtime IDs returned by the service.
+The backend's display labels do not always match its runtime IDs. For example, `gemini-3.5-flash-extra-low`, `gemini-3.5-flash-low`, and `gemini-3-flash-agent` can be displayed as Gemini 3.5 Flash Low, Medium, and High. Gemini 3.7 Flash uses the single `gemini-3.7-flash-tiered` runtime and receives Low, Medium, or High through `generationConfig.thinkingConfig`; Gemini 3.6 Flash still uses separate effort-specific runtime IDs.
 
 | Public model ID     | Input       | Thinking levels shown | Max output tokens | Request routing                                                                                  |
 | ------------------- | ----------- | --------------------- | ----------------- | ------------------------------------------------------------------------------------------------ |
-| `gemini-3.7-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.7-flash-low`; medium → `gemini-3.7-flash-medium`; high → `gemini-3.7-flash-high` |
+| `gemini-3.7-flash`  | Text, image | Low, Medium, High     | 65,536            | `gemini-3.7-flash-tiered` + `thinkingLevel` Low/Medium/High                                      |
 | `gemini-3.6-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.6-flash-low`; medium → `gemini-3.6-flash-medium`; high → `gemini-3.6-flash-high` |
 | `gemini-3.5-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.5-flash-low`; medium → `gemini-3.5-flash-low`; high → `gemini-3-flash-agent`     |
 | `gemini-3.1-pro`    | Text, image | Low, High             | 65,535            | low → `gemini-3.1-pro-low`; high → `gemini-pro-agent`                                            |

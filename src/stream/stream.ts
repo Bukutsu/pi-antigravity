@@ -310,6 +310,13 @@ export function buildRequest(
 
   const generationConfig: GeminiGenerationConfig = {};
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature;
+  if (runtimeModel === "gemini-3.7-flash-tiered") {
+    const effort = options.reasoning ?? "off";
+    generationConfig.thinkingConfig = {
+      thinkingLevel:
+        effort === "high" || effort === "xhigh" ? "HIGH" : effort === "medium" ? "MEDIUM" : "LOW",
+    };
+  }
   const maxAllowed = getMaxOutputTokens(model.id, runtimeModel);
   if (options.maxTokens !== undefined) {
     generationConfig.maxOutputTokens = Math.min(options.maxTokens, maxAllowed);
@@ -644,7 +651,7 @@ export function streamAntigravity(
           : baseRuntimeModel;
 
       const runtimeCandidates = [initialRuntimeModel];
-      const fallback = getFallbackRuntimeModel(initialRuntimeModel);
+      const fallback = getFallbackRuntimeModel(initialRuntimeModel, effort);
       if (fallback && fallback !== initialRuntimeModel) {
         runtimeCandidates.push(fallback);
       }
