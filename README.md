@@ -3,15 +3,27 @@
 [![npm version](https://img.shields.io/npm/v/pi-antigravity?logo=npm)](https://www.npmjs.com/package/pi-antigravity)
 [![license](https://img.shields.io/npm/l/pi-antigravity)](LICENSE)
 
-A Pi Coding Agent provider for Google Antigravity / Cloud Code Assist models. It adds provider `antigravity`, Google OAuth login, native streaming, model routing, and quota diagnostics—without invoking an external Antigravity CLI.
+**pi-antigravity** is a [Pi Coding Agent](https://pi.dev) provider that lets Pi talk directly to Google Antigravity / Cloud Code Assist models — Gemini, plus the Claude and GPT-OSS models Antigravity also advertises. Sign in with Google, pick a model, and go. Under the hood it handles OAuth login, native streaming, model routing, and quota diagnostics itself, so it never shells out to an external Antigravity CLI.
 
 > **Unofficial integration.** This project is not affiliated with or endorsed by Google. Use it only with an account and services you are authorized to access, and review its source before granting OAuth permissions.
+
+## Contents
+
+- [Requirements](#requirements)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Authentication and credential safety](#authentication-and-credential-safety)
+- [Commands](#commands)
+- [Models and routing](#models-and-routing)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
 
 ## Requirements
 
 - Pi Coding Agent and Pi AI version **0.80.0 or later**
 - A Google account that can use the relevant Cloud Code Assist / Antigravity services
-- A browser on the same machine as Pi for the OAuth sign-in flow
+- A browser on the same machine as Pi, for the OAuth sign-in flow
 
 ## Install
 
@@ -39,26 +51,29 @@ Restart Pi (or run `/reload`) after installation. To update the npm package late
    /model antigravity/gemini-3.7-flash
    ```
 
-4. Start working. Use `/antigravity.doctor` if a request fails.
+4. Start working. If a request fails, run `/antigravity.doctor` for sanitized diagnostics.
 
 ## Authentication and credential safety
 
-The provider uses OAuth 2.0 Authorization Code flow with PKCE.
+The provider uses the OAuth 2.0 Authorization Code flow with PKCE, so credentials are only ever exchanged with Google — never typed into Pi.
 
 1. `/login antigravity` opens Google sign-in and starts a temporary callback listener at `http://localhost:51121/oauth-callback`.
-2. After approval, Pi exchanges the callback code for tokens and stores the provider credentials in Pi's auth store (normally `~/.pi/agent/auth.json`).
-3. Pi refreshes access tokens when needed.
+2. After you approve access, Pi exchanges the callback code for tokens and stores the provider credentials in Pi's auth store (normally `~/.pi/agent/auth.json`).
+3. Pi refreshes access tokens automatically when they expire — you shouldn't need to sign in again unless a token is revoked.
 
-The callback listener binds only to a loopback host. The auth file contains sensitive access and refresh tokens: do not commit it, paste it into issues, or share its contents.
+The callback listener binds only to a loopback host, so it isn't reachable from outside your machine. The auth file it writes to contains sensitive access and refresh tokens: **do not commit it, paste it into issues, or share its contents.**
 
-The login requests these Google OAuth scopes:
+Signing in requests these Google OAuth scopes:
 
-- `cloud-platform`
-- `userinfo.email` and `userinfo.profile`
-- `cclog`
-- `experimentsandconfigs`
+| Scope                                | Why it's needed                                                           |
+| ------------------------------------ | ------------------------------------------------------------------------- |
+| `aicode`                             | Access to the Cloud Code Assist / Antigravity model catalog and endpoints |
+| `cloud-platform`                     | General Cloud Code Assist API access                                      |
+| `userinfo.email`, `userinfo.profile` | Identify the signed-in Google account                                     |
+| `cclog`                              | Cloud Code Assist logging/telemetry endpoints used by the API             |
+| `experimentsandconfigs`              | Server-side experiment and config flags for the API                       |
 
-Review these permissions before approving access. Re-run `/login antigravity` to replace expired or revoked credentials.
+Review these permissions before approving access. If your credentials expire or are revoked, just re-run `/login antigravity` to sign in again.
 
 ## Commands
 
@@ -75,9 +90,9 @@ Model availability, entitlement, quota groups, and resets are returned by the se
 
 ## Models and routing
 
-The static model IDs registered by this extension match the Antigravity CLI catalog (`agy models`). Use `/antigravity.models` to see live availability and quota for your account.
+The static model IDs registered by this extension match the Antigravity CLI catalog (`agy models`). Use `/antigravity.models` to see live availability and quota for your account — the table below is a reference for what each public model ID maps to.
 
-`agy models` advertises display entries across Gemini Flash (3.7, 3.6, 3.5), Gemini Pro, Claude Sonnet/Opus Thinking, and GPT-OSS Medium. Pi collapses those into seven public model IDs while only showing each model's advertised thinking level(s).
+`agy models` advertises display entries across Gemini Flash (3.7, 3.6, 3.5), Gemini Pro, Claude Sonnet/Opus Thinking, and GPT-OSS Medium. Pi collapses those into seven public model IDs, each showing only the thinking level(s) that model advertises.
 
 ### Why Claude and GPT-OSS appear
 
