@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.10] - 2026-08-15
+
+### Documentation
+
+- **README & Security Polish:** Reorganized documentation with a table of contents, clear onboarding structure, detailed breakdown of required OAuth scopes in a reference table, and updated security policy.
+
 ## [0.2.9] - 2026-08-15
 
 ### Fixed
