@@ -107,6 +107,40 @@ async function postJson(
   throw new Error(`${path} failed: ${lastErrorText || "no endpoint available"}`);
 }
 
+async function fetchAvailableModelsFromEndpoint(
+  endpoint: string,
+  token: string,
+  projectId: string,
+): Promise<{ endpoint: string; status: number; data: unknown } | undefined> {
+  // `{}` and `{ project: projectId }` return byte-identical catalogs on this endpoint
+  // (verified against the live backend) — one body is the full search space per host.
+  try {
+    const res = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+      method: "POST",
+      headers: jsonHeaders(token),
+      body: JSON.stringify({ project: projectId }),
+    });
+    const text = await res.text();
+    let data: unknown;
+    try {
+      data = JSON.parse(text) as unknown;
+    } catch {
+      data = { raw: text } satisfies ApiErrorBody;
+    }
+    if (!res.ok) {
+      const errorBody = isRecord(data) ? (data as ApiErrorBody) : undefined;
+      const lastErrorText =
+        typeof errorBody?.error?.message === "string" ? errorBody.error.message : text;
+      setLastError(lastErrorText);
+      return undefined;
+    }
+    return { endpoint, status: res.status, data };
+  } catch (error) {
+    setLastError(safeError(error));
+    return undefined;
+  }
+}
+
 /**
  * Merge fetchAvailableModels across endpoint candidates so daily/sandbox-only
  * models (e.g. Gemini 3.6 Flash) appear alongside production catalog entries.
@@ -115,59 +149,36 @@ async function fetchMergedAvailableModels(
   token: string,
   projectId: string,
 ): Promise<{ endpoint: string; status: number; data: AvailableModelsRaw }> {
-  const bodies: Array<Record<string, unknown>> = [{ project: projectId }, {}];
+  // Both endpoints are always queried to merge their catalogs — fetch them concurrently
+  // instead of blocking on production before starting the daily/sandbox request.
+  const results = await Promise.all(
+    endpointCandidates().map((endpoint) =>
+      fetchAvailableModelsFromEndpoint(endpoint, token, projectId),
+    ),
+  );
+
   const mergedModels: Record<string, unknown> = {};
   let defaultAgentModelId: string | undefined;
   let lastEndpoint = "";
   let lastStatus = 0;
-  let sawOk = false;
-  let lastErrorText = "";
 
-  for (const endpoint of endpointCandidates()) {
-    for (const body of bodies) {
-      try {
-        const res = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
-          method: "POST",
-          headers: jsonHeaders(token),
-          body: JSON.stringify(body),
-        });
-        setLastEndpoint(endpoint);
-        setLastStatus(res.status);
-        const text = await res.text();
-        let data: unknown;
-        try {
-          data = JSON.parse(text) as unknown;
-        } catch {
-          data = { raw: text } satisfies ApiErrorBody;
-        }
-        if (!res.ok) {
-          const errorBody = isRecord(data) ? (data as ApiErrorBody) : undefined;
-          lastErrorText =
-            typeof errorBody?.error?.message === "string" ? errorBody.error.message : text;
-          continue;
-        }
-
-        sawOk = true;
-        lastEndpoint = endpoint;
-        lastStatus = res.status;
-        if (isRecord(data) && isRecord(data.models)) {
-          Object.assign(mergedModels, data.models);
-        }
-        if (isRecord(data) && typeof data.defaultAgentModelId === "string") {
-          defaultAgentModelId = data.defaultAgentModelId;
-        }
-        break; // next endpoint after first successful body for this host
-      } catch (error) {
-        lastErrorText = safeError(error);
-        setLastError(lastErrorText);
-      }
+  for (const result of results) {
+    if (!result) continue;
+    setLastEndpoint(result.endpoint);
+    setLastStatus(result.status);
+    lastEndpoint = result.endpoint;
+    lastStatus = result.status;
+    const data = result.data;
+    if (isRecord(data) && isRecord(data.models)) {
+      Object.assign(mergedModels, data.models);
+    }
+    if (isRecord(data) && typeof data.defaultAgentModelId === "string") {
+      defaultAgentModelId = data.defaultAgentModelId;
     }
   }
 
-  if (!sawOk) {
-    throw new Error(
-      `/v1internal:fetchAvailableModels failed: ${lastErrorText || "no endpoint available"}`,
-    );
+  if (!lastEndpoint) {
+    throw new Error(`/v1internal:fetchAvailableModels failed: no endpoint available`);
   }
 
   return {

@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.0] - 2026-08-16
+
+### Performance
+
+- **Parallelized model discovery:** `fetchAvailableRuntimeModel` probed 2 endpoints × 3 request-body variants sequentially (up to 6 awaited round-trips) on every cache miss before a generation request could even start. Fired concurrently instead, and removed two variants that were provably dead weight — one always returned a 400 (`cloudaicompanionProject` isn't a real field on this endpoint) and one was byte-identical to another. Measured against the live backend: cold model discovery down from ~3.6s to ~1.4s (2.5x), and the full cold-start setup path (token refresh + discovery) down from ~5.8s to ~1.1s (5.2x).
+- **Skip redundant project discovery on token refresh:** `refreshAntigravityToken` always called `loadCodeAssist` even though its cache is keyed by token and a refresh always mints a new one, guaranteeing a wasted round-trip. Now skipped whenever the credentials already carry a `projectId` (the normal case).
+- **Longer caches:** model-discovery and project-id caches extended from 10/5 minutes to 30 minutes, so the (now much cheaper) cold path is hit a third as often.
+- **Parallelized `/antigravity.usage` and `/antigravity.models`:** merged model-catalog fetch across endpoints concurrently instead of sequentially, and dropped the same dead request-body variant.
+
 ## [0.2.10] - 2026-08-15
 
 ### Documentation

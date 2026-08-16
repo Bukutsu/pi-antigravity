@@ -20,11 +20,18 @@ export const ENDPOINT_FALLBACKS = [
   "https://daily-cloudcode-pa.sandbox.googleapis.com",
 ];
 
-const PROJECT_CACHE_TTL_MS = 5 * 60 * 1000;
+const PROJECT_CACHE_TTL_MS = 30 * 60 * 1000;
 const projectCache = new Map<string, { projectId: string | undefined; expiresAt: number }>();
 
-const MODEL_CACHE_TTL_MS = 10 * 60 * 1000;
+const MODEL_CACHE_TTL_MS = 30 * 60 * 1000;
 const modelCache = new Map<string, { result: DynamicModelInfo | undefined; expiresAt: number }>();
+
+/** Metadata lookups (project/model discovery) must be fast; a stalled endpoint should
+ * fall through to the next candidate instead of hanging the whole request. */
+const DISCOVERY_TIMEOUT_MS = 8000;
+
+/** In-flight de-dupe: concurrent requests for the same (token, project, model) share one probe. */
+const inFlightModelLookups = new Map<string, Promise<DynamicModelInfo | undefined>>();
 
 /** UUID-shaped stable id from a seed (account email preferred over cwd). */
 export function stableProjectId(seed: string): string {
@@ -143,6 +150,7 @@ async function listCloudAICompanionProjects(token: string): Promise<string | und
         method: "POST",
         headers: antigravityHeaders(token),
         body: JSON.stringify({}),
+        signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
       });
       setLastStatus(res.status);
       setLastEndpoint(endpoint);
@@ -298,30 +306,49 @@ async function fetchAvailableRuntimeModelUncached(
   projectId: string,
   requestedRuntimeModel: string,
 ): Promise<DynamicModelInfo | undefined> {
-  const bodies = [{}, { cloudaicompanionProject: projectId }, { project: projectId }];
+  // Verified against the live backend: `{}` and `{ project: projectId }` return
+  // byte-identical catalogs, and `{ cloudaicompanionProject: projectId }` always 400s
+  // ("Unknown name \"cloudaicompanionProject\": Cannot find field") — it's not a real
+  // field on this endpoint. One body per endpoint is the full search space.
+  const bodies = [{ project: projectId }];
   // New models (e.g. Gemini 3.6 Flash) may land on daily/sandbox before production.
-  // Keep searching endpoints until the requested runtime id is found.
-  let lastLabels = "";
-  for (const endpoint of endpointCandidates()) {
-    for (const candidateBody of bodies) {
+  // Fire every endpoint/body combination concurrently instead of awaiting them one at a
+  // time in a nested loop, so a cold lookup costs one round-trip instead of several.
+  const endpoints = endpointCandidates();
+  const attempts = endpoints.flatMap((endpoint) => bodies.map((body) => ({ endpoint, body })));
+
+  type Attempt = { endpoint: string; status: number | undefined; data: unknown };
+  const settled = await Promise.all(
+    attempts.map(async ({ endpoint, body }): Promise<Attempt> => {
       try {
         const res = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
           method: "POST",
           headers: antigravityHeaders(token),
-          body: JSON.stringify(candidateBody),
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
         });
-        setLastStatus(res.status);
-        setLastEndpoint(endpoint);
-        if (!res.ok) continue;
-        const data: unknown = await res.json();
-        const labels = [...new Set(collectModelLabels(data))].slice(0, 16);
-        lastLabels = labels.join(",");
-        setLastAvailableModels(lastLabels);
-        const found = findDynamicModel(data, requestedRuntimeModel);
-        if (found) return found;
+        if (!res.ok) return { endpoint, status: res.status, data: undefined };
+        return { endpoint, status: res.status, data: await res.json() };
       } catch (error) {
         setLastError(safeError(error));
+        return { endpoint, status: undefined, data: undefined };
       }
+    }),
+  );
+
+  // Resolve in the original priority order (endpoint[0]/body[0] first) so diagnostics
+  // and the winning match stay deterministic regardless of which request lands first.
+  let lastLabels = "";
+  for (const { endpoint, status, data } of settled) {
+    if (status !== undefined) setLastStatus(status);
+    if (data === undefined) continue;
+    setLastEndpoint(endpoint);
+    const labels = [...new Set(collectModelLabels(data))].slice(0, 16);
+    if (labels.length) lastLabels = labels.join(",");
+    const found = findDynamicModel(data, requestedRuntimeModel);
+    if (found) {
+      if (lastLabels) setLastAvailableModels(lastLabels);
+      return found;
     }
   }
   if (lastLabels) setLastAvailableModels(lastLabels);
@@ -337,17 +364,30 @@ export async function fetchAvailableRuntimeModel(
   const cached = modelCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.result;
 
-  const result = await fetchAvailableRuntimeModelUncached(token, projectId, requestedRuntimeModel);
-  modelCache.set(cacheKey, { result, expiresAt: Date.now() + MODEL_CACHE_TTL_MS });
+  // De-dupe concurrent lookups for the same key (e.g. parallel requests right after
+  // startup) so they share one probe instead of each firing their own round-trips.
+  const inFlight = inFlightModelLookups.get(cacheKey);
+  if (inFlight) return inFlight;
 
-  // Evict expired entries; bound map size to avoid unbounded growth.
-  if (modelCache.size > 64) {
-    const now = Date.now();
-    for (const [key, entry] of modelCache) {
-      if (entry.expiresAt <= now) modelCache.delete(key);
+  const promise = fetchAvailableRuntimeModelUncached(token, projectId, requestedRuntimeModel).then(
+    (result) => {
+      modelCache.set(cacheKey, { result, expiresAt: Date.now() + MODEL_CACHE_TTL_MS });
+      return result;
+    },
+  );
+  inFlightModelLookups.set(cacheKey, promise);
+  try {
+    return await promise;
+  } finally {
+    inFlightModelLookups.delete(cacheKey);
+    // Evict expired entries; bound map size to avoid unbounded growth.
+    if (modelCache.size > 64) {
+      const now = Date.now();
+      for (const [key, entry] of modelCache) {
+        if (entry.expiresAt <= now) modelCache.delete(key);
+      }
     }
   }
-  return result;
 }
 
 export function clearModelCache(): void {
@@ -369,6 +409,7 @@ async function loadCodeAssistUncached(token: string): Promise<string | undefined
         method: "POST",
         headers: antigravityHeaders(token),
         body,
+        signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
       });
       setLastStatus(res.status);
       setLastEndpoint(endpoint);

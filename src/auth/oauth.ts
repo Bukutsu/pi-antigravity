@@ -263,7 +263,11 @@ export async function refreshAntigravityToken(
     expires_in: number;
     refresh_token?: string;
   };
-  const discoveredProject = await loadCodeAssist(data.access_token);
+  // Every refresh mints a brand-new access token, so loadCodeAssist's token-keyed cache
+  // can never hit here — skip the extra round-trip entirely when we already know the
+  // project id (the normal case; it's set at login and doesn't change token to token).
+  const existingProjectId = credentialProjectId(credentials);
+  const discoveredProject = existingProjectId ? undefined : await loadCodeAssist(data.access_token);
   const email = credentialEmail(credentials);
   return {
     ...credentials,
@@ -271,9 +275,7 @@ export async function refreshAntigravityToken(
     access: data.access_token,
     expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
     projectId:
-      discoveredProject ||
-      credentialProjectId(credentials) ||
-      defaultProjectId(email || "antigravity-default"),
+      existingProjectId || discoveredProject || defaultProjectId(email || "antigravity-default"),
   };
 }
 
