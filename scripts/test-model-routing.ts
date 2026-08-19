@@ -172,6 +172,35 @@ assert.deepEqual(nullableDecl?.parameters, {
   },
   required: ["path"],
 });
+
+// Test local $ref / $defs dereferencing
+const refTool = {
+  name: "ref_probe",
+  description: "Tool with local $ref and $defs",
+  parameters: {
+    type: "object",
+    properties: {
+      status: { $ref: "#/$defs/Status" },
+    },
+    $defs: {
+      Status: { type: "string", enum: ["open", "closed"] },
+    },
+  },
+} as Tool;
+const dereferencedGemini = convertTools([refTool])?.[0]?.functionDeclarations[0];
+assert.deepEqual(dereferencedGemini?.parametersJsonSchema, {
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["open", "closed"] },
+  },
+});
+const dereferencedCustom = convertTools([refTool], true)?.[0]?.functionDeclarations[0];
+assert.deepEqual(dereferencedCustom?.parameters, {
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["open", "closed"] },
+  },
+});
 assert.match(
   friendlyAntigravityError(400, JSON.stringify({ error: { message: "Unknown name nullable" } })),
   /Unknown name nullable/i,
@@ -265,6 +294,74 @@ assert.ok(
       "output" in part.functionResponse.response,
   ),
 );
+
+// Test consecutive same-role message merging
+const consecutiveContext = {
+  messages: [
+    { role: "user", content: "question 1", timestamp: Date.now() },
+    { role: "user", content: "question 2", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "answer 1" }],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "claude-sonnet-4-6",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "answer 2" }],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "claude-sonnet-4-6",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    },
+  ],
+} as Context;
+const mergedContents = convertMessages(model, consecutiveContext, "claude-sonnet-4-6");
+assert.equal(mergedContents.length, 2);
+assert.equal(mergedContents[0]?.role, "user");
+assert.equal(mergedContents[0]?.parts.length, 2);
+assert.equal(mergedContents[1]?.role, "model");
+assert.equal(mergedContents[1]?.parts.length, 2);
+
+// Test Base64 Image data URL prefix stripping
+const imageContext = {
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "check image" },
+        { type: "image", data: "data:image/jpeg;base64,/9j/4AAQSkZJRg==", mimeType: "image/jpeg" },
+      ],
+      timestamp: Date.now(),
+    },
+  ],
+} as Context;
+const imageContents = convertMessages(model, imageContext, "gemini-3.7-flash-tiered");
+assert.equal(imageContents[0]?.parts.length, 2);
+const imgPart = imageContents[0]?.parts[1];
+assert.ok(imgPart && "inlineData" in imgPart);
+assert.equal(imgPart.inlineData.data, "/9j/4AAQSkZJRg==");
+assert.equal(imgPart.inlineData.mimeType, "image/jpeg");
 
 // Test max output token limits per runtime model
 assert.equal(getMaxOutputTokens("gemini-3.7-flash", "gemini-3.7-flash-tiered"), 65536);

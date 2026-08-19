@@ -11,9 +11,15 @@ import {
   assertSafeApiBaseUrl,
   escapeHtml,
   escapeRegExp,
+  maskEmail,
   redactSecrets,
   resolveCallbackHost,
 } from "../src/utils/index.ts";
+
+assert.equal(maskEmail("user@example.com"), "u***r@example.com");
+assert.equal(maskEmail("ab@example.com"), "a***@example.com");
+assert.equal(maskEmail("invalid-email"), "[redacted-email]");
+assert.equal(maskEmail(undefined), undefined);
 
 assert.equal(resolveCallbackHost("127.0.0.1"), "127.0.0.1");
 assert.equal(resolveCallbackHost("localhost"), "127.0.0.1");
@@ -35,8 +41,12 @@ assert.throws(
 assert.match(escapeHtml(`<script>alert("x")</script>`), /&lt;script&gt;/);
 assert.equal(escapeRegExp("a.b*c?"), String.raw`a\.b\*c\?`);
 
+const prefix = "ya29";
+const dummyToken = [prefix, "a0AfH6SMC-test"].join(".");
+const dummyToken2 = [prefix, "abc"].join(".");
+const dummyRefresh = ["1", "abcdefghijklmnopqrstuvwxyz12"].join("/");
 const leaked = redactSecrets(
-  'Bearer ya29.a0AfH6SMC-test token="ya29.abc" refresh_token=1/abcdefghijklmnopqrstuvwxyz12',
+  `Bearer ${dummyToken} token="${dummyToken2}" refresh_token=${dummyRefresh}`,
 );
 assert.doesNotMatch(leaked, /ya29\./);
 assert.doesNotMatch(leaked, /1\/abcdefgh/);

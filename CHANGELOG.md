@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.1] - 2026-08-19
+
+### Performance
+
+- **Fast Time-to-First-Token (TTFT):** Bypassed pre-flight model discovery round-trips for known static models (`gemini-3.7-flash`, `claude-sonnet-4-6`, etc.), immediately sending streaming requests with verified runtime IDs and falling back to dynamic lookup only when needed.
+- **Fast-path endpoint discovery:** Updated model discovery to prioritize the primary production endpoint and return immediately upon match, eliminating latency stalls from slower sandbox endpoints.
+- **Parallelized usage & quota fetch:** `fetchAccountUsage()` now runs `loadCodeAssist`, `retrieveUserQuotaSummary`, and `fetchMergedAvailableModels` concurrently in a single `Promise.all()`, roughly halving `/antigravity.usage` execution time.
+
+### Fixed
+
+- **Turn alternation & message merge:** Automatically merge consecutive same-role messages (`user` or `model`) and guarantee initial user turn in `convertMessages()`, preventing 400 Bad Request multi-turn errors from Google Cloud Code Assist.
+- **Base64 image Data URLs:** Sanitize image data by stripping `data:...;base64,` prefixes and auto-detecting MIME types in `asTextParts()` to prevent image payload rejection by Gemini.
+- **Tool schema `$ref` dereferencing:** Inlined local `$defs` / `definitions` in tool schemas before meta keyword stripping, preventing dangling `$ref` schema errors on complex custom tools.
+- **OAuth server socket cleanup:** Added friendly `EADDRINUSE` messaging for port 51121 and called `server.closeAllConnections()` for immediate socket teardown upon sign-in completion.
+
+### Diagnostics
+
+- **Latency & Doctor enhancements:** Added `lastLatencyMs` to `/antigravity.doctor` and introduced a safe `maskEmail` utility.
+
 ## [0.3.0] - 2026-08-16
 
 ### Performance

@@ -276,23 +276,38 @@ function parseTier(value: unknown): TierInfo | undefined {
   };
 }
 
-export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsage> {
-  const creds = parseApiKey(apiKeyRaw);
-
-  // Fetch loadCodeAssist and quota summary in parallel — reuse the single
-  // loadCodeAssist response for both project ID resolution and tier info.
-  const [assistResult, summary] = await Promise.all([
-    postJson("/v1internal:loadCodeAssist", creds.token, {
+async function loadCodeAssistSafe(token: string) {
+  try {
+    return await postJson("/v1internal:loadCodeAssist", token, {
       metadata: {
         ideType: "ANTIGRAVITY",
         platform: "PLATFORM_UNSPECIFIED",
         pluginType: "GEMINI",
       },
-    }).catch(() => null),
+    });
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsage> {
+  const creds = parseApiKey(apiKeyRaw);
+  const initialProjectId =
+    creds.projectId ||
+    resolveProjectId({
+      token: creds.token,
+      credentialProjectId: creds.projectId,
+    });
+
+  // Fetch loadCodeAssist, quota summary, and available models all in parallel
+  // to minimize command execution latency.
+  const [assistResult, summary, available] = await Promise.all([
+    loadCodeAssistSafe(creds.token),
     postJson("/v1internal:retrieveUserQuotaSummary", creds.token, {}),
+    fetchMergedAvailableModels(creds.token, initialProjectId),
   ]);
 
-  // Derive project ID from the loadCodeAssist response we already have.
+  // Derive project ID from the loadCodeAssist response or stored project ID.
   const discoveredProject = assistResult ? extractProjectId(assistResult.data) : undefined;
   const projectId = resolveProjectId({
     token: creds.token,
@@ -300,8 +315,6 @@ export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsag
     credentialProjectId: creds.projectId,
   });
   setLastProjectId(projectId);
-
-  const available = await fetchMergedAvailableModels(creds.token, projectId);
 
   const { groups, description } = parseQuotaSummary(summary.data);
   const { models, defaultAgentModelId } = parseModels(available.data);

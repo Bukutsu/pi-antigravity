@@ -56,6 +56,17 @@ export function redactSecrets(text: string): string {
     );
 }
 
+export function maskEmail(email: string | undefined): string | undefined {
+  if (!email || typeof email !== "string") return undefined;
+  const parts = email.split("@");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return "[redacted-email]";
+  const name = parts[0];
+  const domain = parts[1];
+  const lastChar = name.at(-1) || "";
+  const maskedName = name.length > 2 ? `${name[0]}***${lastChar}` : `${name[0]}***`;
+  return `${maskedName}@${domain}`;
+}
+
 export function safeError(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
   return redactSecrets(raw);

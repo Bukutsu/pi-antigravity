@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { defaultProjectId, loadCodeAssist } from "../client/client.js";
 import { escapeHtml, antigravityEnv } from "../utils/util.js";
@@ -87,6 +87,13 @@ async function getUserEmail(token: string): Promise<string | undefined> {
   }
 }
 
+function closeServerGracefully(server: Server): void {
+  if ("closeAllConnections" in server && typeof server.closeAllConnections === "function") {
+    server.closeAllConnections();
+  }
+  server.close();
+}
+
 function startCallbackServer(expectedState: string): Promise<CallbackServer> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -147,11 +154,22 @@ function startCallbackServer(expectedState: string): Promise<CallbackServer> {
       finish(() => resolveCode({ code, state }));
     });
 
-    server.on("error", reject);
+    server.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRINUSE") {
+        reject(
+          new Error(
+            "Port 51121 is already in use by another process. Please close the process using port 51121 and retry /login antigravity.",
+          ),
+        );
+      } else {
+        reject(err);
+      }
+    });
+
     server.listen(51121, CALLBACK_HOST, () => {
       timeout = setTimeout(() => {
         finish(() => rejectCode(new Error("OAuth callback timed out waiting for browser login")));
-        server.close();
+        closeServerGracefully(server);
       }, OAUTH_CALLBACK_TIMEOUT_MS);
       resolve({ server, waitForCode: () => codePromise });
     });
@@ -236,7 +254,7 @@ export async function loginAntigravity(
       email,
     };
   } finally {
-    server.close();
+    closeServerGracefully(server);
   }
 }
 

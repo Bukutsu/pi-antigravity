@@ -9,6 +9,9 @@ export type DiagnosticsSnapshot = {
   resolvedRuntimeModel?: string;
   availableModels?: string;
   matchedModelDebug?: string;
+  latencyMs?: number;
+  maskedEmail?: string;
+  tokenExpiry?: string;
 };
 
 const storage = new AsyncLocalStorage<DiagnosticsSnapshot>();
@@ -70,6 +73,15 @@ export function setLastAvailableModels(models: string | undefined): void {
 export function setLastMatchedModelDebug(debug: string | undefined): void {
   currentBag().matchedModelDebug =
     debug === undefined ? undefined : redactSecrets(debug).slice(0, 1200);
+}
+export function setLastLatencyMs(ms: number | undefined): void {
+  currentBag().latencyMs = ms;
+}
+export function setLastMaskedEmail(email: string | undefined): void {
+  currentBag().maskedEmail = email;
+}
+export function setLastTokenExpiry(expiry: string | undefined): void {
+  currentBag().tokenExpiry = expiry;
 }
 
 /** Test helper: reset last snapshot between cases. */
