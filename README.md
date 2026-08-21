@@ -137,8 +137,15 @@ All primary environment variables start with `ANTIGRAVITY_`. The legacy `NOAGY_`
 | `ANTIGRAVITY_RUNTIME_MODEL` | Pin requests to a runtime model ID, bypassing normal static routing.                                             |
 | `ANTIGRAVITY_CLIENT_ID`     | Use a custom Google OAuth client ID.                                                                             |
 | `ANTIGRAVITY_CLIENT_SECRET` | Use a custom Google OAuth client secret. Keep it out of source control and shell history.                        |
+| `ANTIGRAVITY_NO_KEEPALIVE`  | Set to `1` to disable the long-lived keep-alive connection pool and use Node's fetch defaults.                   |
+| `ANTIGRAVITY_NO_PREWARM`    | Set to `1` to skip the TLS pre-warm request made when the extension loads.                                       |
+| `ANTIGRAVITY_HTTP2`         | Set to `1` to negotiate HTTP/2 for API requests. Off by default.                                                 |
 
 By default, the provider tries `https://cloudcode-pa.googleapis.com` and then its Google sandbox fallback if necessary. Prefer the built-in OAuth client unless you have a reason to use your own credentials.
+
+### Latency
+
+Provider requests reuse a long-lived keep-alive connection pool, so consecutive turns do not repeat the DNS, TCP, and TLS handshake. The pool is scoped to this provider and does not change HTTP behaviour elsewhere in Pi. The connection is also opened when the extension loads so the first message of a session skips the handshake too. For the lowest time-to-first-token, pick a fast runtime: `gemini-3.7-flash` with reasoning off routes to `gemini-3.7-flash-tiered` at thinking level `LOW`. Setting `ANTIGRAVITY_PROJECT_ID` also removes the project-discovery round-trip when credentials do not already carry a project ID.
 
 ## Troubleshooting
 

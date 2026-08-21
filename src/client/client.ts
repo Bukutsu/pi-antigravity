@@ -13,6 +13,7 @@ import {
 import { assertSafeApiBaseUrl, safeError } from "../utils/security.js";
 import type { AntigravityApiKey, DynamicModelInfo } from "../types/types.js";
 import { antigravityEnv, asString, escapeRegExp, isRecord } from "../utils/util.js";
+import { antigravityFetch } from "../utils/http.js";
 
 export const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 export const ENDPOINT_FALLBACKS = [
@@ -146,7 +147,7 @@ export function extractProjectId(data: unknown): string | undefined {
 async function listCloudAICompanionProjects(token: string): Promise<string | undefined> {
   for (const endpoint of endpointCandidates()) {
     try {
-      const res = await fetch(`${endpoint}/v1internal:listCloudAICompanionProjects`, {
+      const res = await antigravityFetch(`${endpoint}/v1internal:listCloudAICompanionProjects`, {
         method: "POST",
         headers: antigravityHeaders(token),
         body: JSON.stringify({}),
@@ -314,7 +315,7 @@ async function fetchAvailableRuntimeModelUncached(
   // resolves the model, return immediately without waiting on slower sandbox endpoints.
   for (const endpoint of endpoints) {
     try {
-      const res = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+      const res = await antigravityFetch(`${endpoint}/v1internal:fetchAvailableModels`, {
         method: "POST",
         headers: antigravityHeaders(token),
         body,
@@ -390,7 +391,7 @@ async function loadCodeAssistUncached(token: string): Promise<string | undefined
 
   for (const endpoint of endpointCandidates()) {
     try {
-      const res = await fetch(`${endpoint}/v1internal:loadCodeAssist`, {
+      const res = await antigravityFetch(`${endpoint}/v1internal:loadCodeAssist`, {
         method: "POST",
         headers: antigravityHeaders(token),
         body,

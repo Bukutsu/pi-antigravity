@@ -14,6 +14,7 @@ import {
 } from "../diagnostics/diagnostics.js";
 import { isRecord } from "../utils/util.js";
 import { safeError } from "../utils/security.js";
+import { antigravityFetch } from "../utils/http.js";
 import type {
   AccountUsage,
   ApiErrorBody,
@@ -75,7 +76,7 @@ async function postJson(
   let lastErrorText = "";
   for (const endpoint of endpointCandidates()) {
     try {
-      const res = await fetch(`${endpoint}${path}`, {
+      const res = await antigravityFetch(`${endpoint}${path}`, {
         method: "POST",
         headers: jsonHeaders(token),
         body: JSON.stringify(body),
@@ -115,7 +116,7 @@ async function fetchAvailableModelsFromEndpoint(
   // `{}` and `{ project: projectId }` return byte-identical catalogs on this endpoint
   // (verified against the live backend) — one body is the full search space per host.
   try {
-    const res = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+    const res = await antigravityFetch(`${endpoint}/v1internal:fetchAvailableModels`, {
       method: "POST",
       headers: jsonHeaders(token),
       body: JSON.stringify({ project: projectId }),

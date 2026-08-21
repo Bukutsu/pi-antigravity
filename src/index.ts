@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { getApiKey, loginAntigravity, refreshAntigravityToken } from "./auth/index.js";
-import { DEFAULT_ENDPOINT } from "./client/index.js";
+import { DEFAULT_ENDPOINT, endpointCandidates } from "./client/index.js";
 import { getLastDiagnostics, runWithDiagnostics } from "./diagnostics/index.js";
 import { ANTIGRAVITY_MODELS, PROVIDER_ID, PROVIDER_NAME } from "./models/index.js";
 import { ANTIGRAVITY_API, streamAntigravity } from "./stream/index.js";
@@ -10,7 +10,7 @@ import {
   formatUsageSummary,
   resolveApiKeyFromContext,
 } from "./usage/index.js";
-import { redactSecrets } from "./utils/index.js";
+import { prewarmConnection, redactSecrets } from "./utils/index.js";
 
 async function withUsage(
   ctx: ExtensionCommandContext,
@@ -37,6 +37,11 @@ async function withUsage(
 }
 
 export default function (pi: ExtensionAPI): void {
+  // Open the TLS connection up front so the first message of a session does not pay
+  // the handshake. Opt out with ANTIGRAVITY_NO_PREWARM=1.
+  const primaryEndpoint = endpointCandidates()[0];
+  if (primaryEndpoint) prewarmConnection(primaryEndpoint);
+
   pi.registerProvider(PROVIDER_ID, {
     name: PROVIDER_NAME,
     baseUrl: DEFAULT_ENDPOINT,
