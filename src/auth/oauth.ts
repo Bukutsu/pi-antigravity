@@ -166,12 +166,23 @@ function startCallbackServer(expectedState: string): Promise<CallbackServer> {
       }
     });
 
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      closeServerGracefully(server);
+    };
+    const cleanup = () => {
+      finish(() => rejectCode(new Error("OAuth callback cancelled")));
+      close();
+    };
+
     server.listen(51121, CALLBACK_HOST, () => {
       timeout = setTimeout(() => {
         finish(() => rejectCode(new Error("OAuth callback timed out waiting for browser login")));
-        closeServerGracefully(server);
+        close();
       }, OAUTH_CALLBACK_TIMEOUT_MS);
-      resolve({ server, waitForCode: () => codePromise });
+      resolve({ server, waitForCode: () => codePromise, cleanup });
     });
   });
 }
@@ -186,6 +197,127 @@ function credentialEmail(credentials: OAuthCredentials): string | undefined {
   return typeof email === "string" ? email : undefined;
 }
 
+/**
+ * Parse a callback URL (or bare query string) pasted by the user from a
+ * remote/headless browser that could not reach the local callback server.
+ * Returns the validated {code, state} or throws a descriptive error. The checks
+ * mirror the local callback server so a pasted URL is accepted under the exact
+ * same rules as a same-machine browser redirect.
+ */
+function parsePastedCallback(raw: string, expectedState: string): { code: string; state: string } {
+  const text = (raw ?? "").trim();
+  if (!text) {
+    throw new Error(
+      "No callback pasted. Paste the full URL from your browser's address bar (http://localhost:51121/oauth-callback?…).",
+    );
+  }
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    // Bare query string: "state=…&code=…" or "?state=…&code=…"
+    const qs = text.startsWith("?") ? text.slice(1) : text;
+    url = new URL(`http://localhost:51121/oauth-callback?${qs}`);
+  }
+  const error = url.searchParams.get("error");
+  if (error) throw new Error(`OAuth error from browser: ${error.slice(0, 200)}`);
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+  if (!code || !state) {
+    throw new Error(
+      "Pasted text is missing 'code' or 'state'. Paste the FULL callback URL from your browser's address bar (http://localhost:51121/oauth-callback?…).",
+    );
+  }
+  if (state !== expectedState) {
+    throw new Error(
+      "State mismatch: that callback is from a different sign-in. Re-run /login antigravity, sign in again, and paste the new URL.",
+    );
+  }
+  return { code, state };
+}
+
+/**
+ * Resolve the authorization code from either the local callback server (browser
+ * on the same machine) or a pasted callback URL (browser on a remote/headless
+ * machine that cannot reach localhost:51121). Whichever provides a valid code
+ * first wins; the losing path is cancelled. Honors callbacks.signal for cancel.
+ */
+async function acquireAuthCode(
+  expectedState: string,
+  opts: {
+    waitForCode: () => Promise<{ code: string; state: string }>;
+    callbacks: OAuthLoginCallbacks;
+  },
+): Promise<{ code: string; state: string }> {
+  const { waitForCode, callbacks } = opts;
+  // Signals the losing candidate(s) to stop once the race settles.
+  const settle = new AbortController();
+  const candidates: Promise<{ code: string; state: string }>[] = [waitForCode()];
+
+  // Manual paste path: offered whenever the callback surface can prompt.
+  if (typeof callbacks.onPrompt === "function") {
+    const promptLoop = async (): Promise<{ code: string; state: string }> => {
+      let promptMessage =
+        "Remote/headless machine (your browser can't reach localhost:51121)? " +
+        "After signing in, paste the full callback URL shown in your browser's address bar.";
+      while (true) {
+        if (callbacks.signal?.aborted || settle.signal.aborted) {
+          throw new Error("Login cancelled");
+        }
+        let text: string;
+        try {
+          text = await callbacks.onPrompt({
+            message: promptMessage,
+            placeholder: "http://localhost:51121/oauth-callback?state=…&code=…",
+          });
+        } catch (err: unknown) {
+          // Prompt/transport failure — propagate, do not retry.
+          throw err instanceof Error ? err : new Error(String(err));
+        }
+        if (callbacks.signal?.aborted || settle.signal.aborted) {
+          throw new Error("Login cancelled");
+        }
+        try {
+          return parsePastedCallback(text, expectedState);
+        } catch (err: unknown) {
+          if (callbacks.signal?.aborted || settle.signal.aborted) {
+            throw new Error("Login cancelled", { cause: err });
+          }
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          promptMessage = `Invalid callback (${errorMessage}). Please paste the full URL:`;
+        }
+      }
+    };
+    candidates.push(promptLoop());
+  }
+
+  // Flow cancellation (escape) aborts the whole login when a signal is provided.
+  let removeAbortListener: (() => void) | undefined;
+  if (callbacks.signal) {
+    candidates.push(
+      new Promise<never>((_resolve, reject) => {
+        const signal = callbacks.signal as AbortSignal;
+        if (signal.aborted) return reject(new Error("Login cancelled"));
+        const onAbort = () => reject(new Error("Login cancelled"));
+        signal.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+      }),
+    );
+  }
+
+  // Suppress unhandled rejections from losing candidates after the race settles.
+  for (const candidate of candidates) {
+    candidate.catch(() => {});
+  }
+
+  try {
+    return await Promise.race(candidates);
+  } finally {
+    settle.abort();
+    removeAbortListener?.();
+  }
+}
+
 export async function loginAntigravity(
   callbacks: OAuthLoginCallbacks,
 ): Promise<AntigravityOAuthCredentials> {
@@ -193,7 +325,7 @@ export async function loginAntigravity(
   // State must be independent of the PKCE verifier so a leaked callback URL
   // cannot also disclose the code_verifier needed to mint tokens.
   const state = base64Url(randomBytes(32));
-  const { server, waitForCode } = await startCallbackServer(state);
+  const { waitForCode, cleanup } = await startCallbackServer(state);
   try {
     const authParams = new URLSearchParams({
       client_id: CLIENT_ID,
@@ -208,10 +340,14 @@ export async function loginAntigravity(
     });
     callbacks.onAuth({
       url: `${AUTH_URL}?${authParams.toString()}`,
-      instructions: "Complete Google sign-in. Pi will capture the local callback.",
+      instructions:
+        "Complete Google sign-in. Pi captures the local callback automatically — or, on a remote/headless machine, paste the callback URL when prompted.",
     });
 
-    const { code, state: returnedState } = await waitForCode();
+    const { code, state: returnedState } = await acquireAuthCode(state, {
+      waitForCode,
+      callbacks,
+    });
     if (returnedState !== state) throw new Error("OAuth state mismatch");
 
     const tokenResponse = await fetch(TOKEN_URL, {
@@ -254,7 +390,7 @@ export async function loginAntigravity(
       email,
     };
   } finally {
-    closeServerGracefully(server);
+    cleanup();
   }
 }
 
