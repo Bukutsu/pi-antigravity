@@ -12,6 +12,23 @@ import {
 } from "./usage/index.js";
 import { prewarmConnection, redactSecrets } from "./utils/index.js";
 
+/**
+ * Pi's interactive `notify` writes into the chat transcript. `console.log` in that
+ * mode prints to the raw terminal and paints over the TUI. Use one channel only.
+ */
+function emitCommandOutput(
+  ctx: ExtensionCommandContext,
+  text: string,
+  type: "info" | "warning" | "error" = "info",
+): void {
+  if (ctx.hasUI) {
+    ctx.ui.notify(text, type);
+    return;
+  }
+  if (type === "warning" || type === "error") console.error(text);
+  else console.log(text);
+}
+
 async function withUsage(
   ctx: ExtensionCommandContext,
   fn: (usage: Awaited<ReturnType<typeof fetchAccountUsage>>) => string,
@@ -19,20 +36,19 @@ async function withUsage(
   try {
     const apiKey = await resolveApiKeyFromContext(ctx);
     if (!apiKey) {
-      const msg = "No Antigravity credentials. Run /login antigravity first.";
-      if (ctx.hasUI) ctx.ui.notify(msg, "warning");
-      else console.log(msg);
+      emitCommandOutput(
+        ctx,
+        "No Antigravity credentials. Run /login antigravity first.",
+        "warning",
+      );
       return;
     }
     if (ctx.hasUI) ctx.ui.notify("Fetching Antigravity usage…", "info");
     const usage = await runWithDiagnostics(() => fetchAccountUsage(apiKey));
-    const text = fn(usage);
-    if (ctx.hasUI) ctx.ui.notify(text, "info");
-    console.log(text);
+    emitCommandOutput(ctx, fn(usage));
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if (ctx.hasUI) ctx.ui.notify(`Antigravity usage failed: ${msg}`, "warning");
-    else console.error(msg);
+    emitCommandOutput(ctx, `Antigravity usage failed: ${msg}`, "warning");
   }
 }
 
@@ -89,9 +105,7 @@ export default function (pi: ExtensionAPI): void {
         "runtimeCli=not-used",
         "commands=/antigravity.usage /antigravity.models /antigravity.doctor",
       ];
-      const text = lines.join("\n");
-      if (ctx.hasUI) ctx.ui.notify(`Antigravity doctor\n${text}`, "info");
-      console.log(text);
+      emitCommandOutput(ctx, `Antigravity doctor\n${lines.join("\n")}`);
     },
   });
 }
