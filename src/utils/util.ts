@@ -1,7 +1,7 @@
-import { randomBytes } from "node:crypto";
+import { ANTIGRAVITY_MODEL_ENUM } from "../models/models.js";
 
 export function antigravityEnv(name: string): string | undefined {
-  return process.env[`ANTIGRAVITY_${name}`] || process.env[`NOAGY_${name}`];
+  return Bun.env[`ANTIGRAVITY_${name}`] || Bun.env[`NOAGY_${name}`];
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -30,5 +30,30 @@ export function escapeRegExp(text: string): string {
 }
 
 export function nowRequestId(): string {
-  return `antigravity-${Date.now()}-${randomBytes(6).toString("hex")}`;
+  return antigravityRequestEnvelope("unknown", false).requestId;
+}
+
+export function antigravityRequestEnvelope(
+  wireModelId: string,
+  isClaude: boolean,
+): { requestId: string; sessionId: string; labels: Record<string, string> } {
+  const agentId = crypto.randomUUID();
+  const trajectoryId = crypto.randomUUID();
+  const step = 2;
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  const sessionId = String(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true));
+  const usageLabel = isClaude ? "true" : "false";
+  const labels: Record<string, string> = {
+    last_step_index: String(step - 1),
+    trajectory_id: trajectoryId,
+    used_claude: usageLabel,
+    used_claude_conservative: usageLabel,
+  };
+  const modelEnum = ANTIGRAVITY_MODEL_ENUM[wireModelId];
+  if (modelEnum) labels.model_enum = modelEnum;
+  return {
+    requestId: `agent/${agentId}/${Date.now()}/${trajectoryId}/${step}`,
+    sessionId,
+    labels,
+  };
 }

@@ -1,7 +1,4 @@
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-
-const auth = JSON.parse(readFileSync(`${homedir()}/.pi/agent/auth.json`, "utf8"));
+const auth = await Bun.file(`${Bun.env.HOME ?? Bun.env.USERPROFILE}/.pi/agent/auth.json`).json();
 const creds = auth.antigravity;
 if (!creds?.refresh) {
   console.error("No antigravity credentials in auth.json");

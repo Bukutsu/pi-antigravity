@@ -1,6 +1,6 @@
 {
   "name": "pi-antigravity",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Personal Antigravity / Cloud Code Assist provider for Pi Coding Agent",
   "author": "Rahul Arya",
   "license": "MIT",
@@ -28,17 +28,18 @@
     "src",
     "tsconfig.json"
   ],
+  "packageManager": "bun@1.4.0",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "security-check": "tsx scripts/security-check.ts",
-    "test": "tsx scripts/test-model-routing.ts && tsx scripts/test-usage-formatter.ts && tsx scripts/test-stream-sse.ts && tsx scripts/test-http-proxy.ts",
-    "smoke:tools": "tsx scripts/smoke-tool-schema.ts",
-    "smoke:models": "node --import tsx scripts/smoke-all-models.mjs",
-    "check": "npm run typecheck && npm run lint && npm run format:check && npm run security-check && npm test"
+    "security-check": "bun scripts/security-check.ts",
+    "test": "bun scripts/test-model-routing.ts && bun scripts/test-usage-formatter.ts && bun scripts/test-stream-sse.ts && bun scripts/test-http-proxy.ts",
+    "smoke:tools": "bun scripts/smoke-tool-schema.ts",
+    "smoke:models": "bun scripts/smoke-all-models.mjs",
+    "check": "bun run typecheck && bun run lint && bun run format:check && bun run security-check && bun run test"
   },
   "pi": {
     "extensions": [
@@ -52,16 +53,12 @@
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.84.2",
     "@eslint/js": "^10.0.1",
-    "@types/node": "^26.1.1",
+    "@types/bun": "^1.4.0",
     "eslint": "^10.7.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.7.0",
     "prettier": "^3.9.5",
-    "tsx": "^4.23.1",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.64.0"
-  },
-  "dependencies": {
-    "undici": "^8.10.0"
   }
 }

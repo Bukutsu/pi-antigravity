@@ -11,11 +11,11 @@ Thanks for improving `pi-antigravity`.
 ## Development setup
 
 ```bash
-npm install
-npm run check
+bun install
+bun run check
 ```
 
-`npm run check` runs TypeScript, ESLint, Prettier, and the repository security checks. Run it before opening a pull request.
+This repo uses [Bun](https://bun.sh). `bun run check` runs TypeScript, ESLint, Prettier, and the repository security checks. Run it before opening a pull request.
 
 ## Pull requests
 
@@ -23,7 +23,7 @@ npm run check
 2. Keep changes small and explain their user impact.
 3. Add or update tests when behavior changes.
 4. Update documentation when commands, authentication, configuration, or models change.
-5. Ensure `npm run check` passes.
+5. Ensure `bun run check` passes.
 
 Do not include credentials, access tokens, refresh tokens, OAuth client secrets, or private account data in commits, issues, pull requests, or logs.
 

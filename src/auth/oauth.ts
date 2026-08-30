@@ -1,5 +1,3 @@
-import { createHash, randomBytes } from "node:crypto";
-import { createServer, type Server } from "node:http";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { defaultProjectId, loadCodeAssist } from "../client/client.js";
 import { escapeHtml, antigravityEnv } from "../utils/util.js";
@@ -25,14 +23,12 @@ export const SCOPES = [
  */
 export const CLIENT_ID =
   antigravityEnv("CLIENT_ID") ||
-  Buffer.from(
+  atob(
     "MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlc" +
       "C5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==",
-    "base64",
-  ).toString("utf8");
+  );
 export const CLIENT_SECRET =
-  antigravityEnv("CLIENT_SECRET") ||
-  Buffer.from("R09DU1BYLUs1OEZXUjQ" + "4NkxkTEoxbUxCOHNYQzR6NnFEQWY=", "base64").toString("utf8");
+  antigravityEnv("CLIENT_SECRET") || atob("R09DU1BYLUs1OEZXUjQ" + "4NkxkTEoxbUxCOHNYQzR6NnFEQWY=");
 
 export const CALLBACK_HOST = resolveCallbackHost();
 
@@ -64,13 +60,15 @@ function sanitizeOAuthProviderError(text: string): string {
   return redacted.slice(0, 300) || "unknown OAuth provider error";
 }
 
-function base64Url(buffer: Buffer): string {
-  return buffer.toString("base64url");
+function base64Url(bytes: Uint8Array): string {
+  return bytes.toBase64({ alphabet: "base64url", omitPadding: true });
 }
 
 function generatePKCE(): { verifier: string; challenge: string } {
-  const verifier = base64Url(randomBytes(32));
-  const challenge = base64Url(createHash("sha256").update(verifier).digest());
+  const verifier = base64Url(crypto.getRandomValues(new Uint8Array(32)));
+  const challenge = base64Url(
+    new Uint8Array(new Bun.CryptoHasher("sha256").update(verifier).digest()),
+  );
   return { verifier, challenge };
 }
 
@@ -87,104 +85,108 @@ async function getUserEmail(token: string): Promise<string | undefined> {
   }
 }
 
-function closeServerGracefully(server: Server): void {
-  if ("closeAllConnections" in server && typeof server.closeAllConnections === "function") {
-    server.closeAllConnections();
-  }
-  server.close();
-}
-
-function startCallbackServer(expectedState: string): Promise<CallbackServer> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    let resolveCode!: (value: { code: string; state: string }) => void;
-    let rejectCode!: (error: Error) => void;
-    const codePromise = new Promise<{ code: string; state: string }>((res, rej) => {
-      resolveCode = res;
-      rejectCode = rej;
-    });
-
-    const finish = (fn: () => void) => {
-      if (settled) return;
-      settled = true;
-      if (timeout) clearTimeout(timeout);
-      fn();
-    };
-
-    const server = createServer((req, res) => {
-      if (req.method !== "GET" && req.method !== "HEAD") {
-        res.writeHead(405, oauthCallbackHeaders("text/plain; charset=utf-8"));
-        res.end("Method Not Allowed");
-        return;
-      }
-
-      const url = new URL(req.url || "", REDIRECT_URI);
-      if (url.pathname !== "/oauth-callback") {
-        res.writeHead(404, oauthCallbackHeaders());
-        res.end("Antigravity OAuth callback route not found.");
-        return;
-      }
-
-      const error = url.searchParams.get("error");
-      const code = url.searchParams.get("code");
-      const state = url.searchParams.get("state");
-      if (error) {
-        const safe = escapeHtml(error.slice(0, 200));
-        res.writeHead(400, oauthCallbackHeaders());
-        res.end(`Antigravity authentication failed: ${safe}`);
-        finish(() => rejectCode(new Error(`OAuth error: ${error.slice(0, 200)}`)));
-        return;
-      }
-      if (!code || !state) {
-        res.writeHead(400, oauthCallbackHeaders());
-        res.end("Antigravity authentication failed: missing code or state.");
-        finish(() => rejectCode(new Error("Missing code or state in OAuth callback")));
-        return;
-      }
-      if (state !== expectedState) {
-        res.writeHead(400, oauthCallbackHeaders());
-        res.end("Antigravity authentication failed: invalid state.");
-        finish(() => rejectCode(new Error("OAuth state mismatch")));
-        return;
-      }
-
-      res.writeHead(200, oauthCallbackHeaders());
-      res.end("Antigravity authentication complete. You can close this window and return to Pi.");
-      finish(() => resolveCode({ code, state }));
-    });
-
-    server.on("error", (err: NodeJS.ErrnoException) => {
-      if (err.code === "EADDRINUSE") {
-        reject(
-          new Error(
-            "Port 51121 is already in use by another process. Please close the process using port 51121 and retry /login antigravity.",
-          ),
-        );
-      } else {
-        reject(err);
-      }
-    });
-
-    let closed = false;
-    const close = () => {
-      if (closed) return;
-      closed = true;
-      closeServerGracefully(server);
-    };
-    const cleanup = () => {
-      finish(() => rejectCode(new Error("OAuth callback cancelled")));
-      close();
-    };
-
-    server.listen(51121, CALLBACK_HOST, () => {
-      timeout = setTimeout(() => {
-        finish(() => rejectCode(new Error("OAuth callback timed out waiting for browser login")));
-        close();
-      }, OAUTH_CALLBACK_TIMEOUT_MS);
-      resolve({ server, waitForCode: () => codePromise, cleanup });
-    });
+function startCallbackServer(expectedState: string): CallbackServer {
+  let settled = false;
+  const timer: { id?: ReturnType<typeof setTimeout> } = {};
+  let resolveCode!: (value: { code: string; state: string }) => void;
+  let rejectCode!: (error: Error) => void;
+  const codePromise = new Promise<{ code: string; state: string }>((res, rej) => {
+    resolveCode = res;
+    rejectCode = rej;
   });
+
+  const finish = (fn: () => void) => {
+    if (settled) return;
+    settled = true;
+    if (timer.id) clearTimeout(timer.id);
+    fn();
+  };
+
+  let server: ReturnType<typeof Bun.serve>;
+  try {
+    server = Bun.serve({
+      hostname: CALLBACK_HOST,
+      port: 51121,
+      // Login can take minutes; disable Bun's default 10s idle disconnect.
+      idleTimeout: 0,
+      fetch(req) {
+        if (req.method !== "GET" && req.method !== "HEAD") {
+          return new Response("Method Not Allowed", {
+            status: 405,
+            headers: oauthCallbackHeaders("text/plain; charset=utf-8"),
+          });
+        }
+
+        const url = new URL(req.url);
+        if (url.pathname !== "/oauth-callback") {
+          return new Response("Antigravity OAuth callback route not found.", {
+            status: 404,
+            headers: oauthCallbackHeaders(),
+          });
+        }
+
+        const error = url.searchParams.get("error");
+        const code = url.searchParams.get("code");
+        const state = url.searchParams.get("state");
+        if (error) {
+          const safe = escapeHtml(error.slice(0, 200));
+          finish(() => rejectCode(new Error(`OAuth error: ${error.slice(0, 200)}`)));
+          return new Response(`Antigravity authentication failed: ${safe}`, {
+            status: 400,
+            headers: oauthCallbackHeaders(),
+          });
+        }
+        if (!code || !state) {
+          finish(() => rejectCode(new Error("Missing code or state in OAuth callback")));
+          return new Response("Antigravity authentication failed: missing code or state.", {
+            status: 400,
+            headers: oauthCallbackHeaders(),
+          });
+        }
+        if (state !== expectedState) {
+          finish(() => rejectCode(new Error("OAuth state mismatch")));
+          return new Response("Antigravity authentication failed: invalid state.", {
+            status: 400,
+            headers: oauthCallbackHeaders(),
+          });
+        }
+
+        finish(() => resolveCode({ code, state }));
+        return new Response(
+          "Antigravity authentication complete. You can close this window and return to Pi.",
+          { status: 200, headers: oauthCallbackHeaders() },
+        );
+      },
+    });
+  } catch (err: unknown) {
+    const code = typeof err === "object" && err && "code" in err ? String(err.code) : undefined;
+    const message = err instanceof Error ? err.message : String(err);
+    if (code === "EADDRINUSE" || /in use/i.test(message)) {
+      throw new Error(
+        "Port 51121 is already in use by another process. Please close the process using port 51121 and retry /login antigravity.",
+        { cause: err },
+      );
+    }
+    throw err instanceof Error ? err : new Error(message, { cause: err });
+  }
+
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    void server.stop(true);
+  };
+  const cleanup = () => {
+    finish(() => rejectCode(new Error("OAuth callback cancelled")));
+    close();
+  };
+
+  timer.id = setTimeout(() => {
+    finish(() => rejectCode(new Error("OAuth callback timed out waiting for browser login")));
+    close();
+  }, OAUTH_CALLBACK_TIMEOUT_MS);
+
+  return { server, waitForCode: () => codePromise, cleanup };
 }
 
 function credentialProjectId(credentials: OAuthCredentials): string | undefined {
@@ -324,8 +326,8 @@ export async function loginAntigravity(
   const { verifier, challenge } = generatePKCE();
   // State must be independent of the PKCE verifier so a leaked callback URL
   // cannot also disclose the code_verifier needed to mint tokens.
-  const state = base64Url(randomBytes(32));
-  const { waitForCode, cleanup } = await startCallbackServer(state);
+  const state = base64Url(crypto.getRandomValues(new Uint8Array(32)));
+  const { waitForCode, cleanup } = startCallbackServer(state);
   try {
     const authParams = new URLSearchParams({
       client_id: CLIENT_ID,

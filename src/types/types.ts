@@ -1,4 +1,3 @@
-import type { Server } from "node:http";
 import type {
   OAuthCredentials,
   SimpleStreamOptions,
@@ -34,7 +33,7 @@ export type DynamicModelInfo = {
 };
 
 export type CallbackServer = {
-  server: Server;
+  server: ReturnType<typeof Bun.serve>;
   waitForCode: () => Promise<{ code: string; state: string }>;
   cleanup: () => void;
 };
@@ -54,7 +53,7 @@ export type AntigravityStreamOptions = SimpleStreamOptions & {
   toolChoice?: ToolChoice;
 };
 
-export type GeminiTextPart = { text: string };
+export type GeminiTextPart = { text: string; thoughtSignature?: string };
 export type GeminiInlineDataPart = { inlineData: { mimeType: string; data: string } };
 export type GeminiThoughtPart = {
   thought: true;
@@ -105,7 +104,9 @@ export type GeminiGenerationConfig = {
   temperature?: number;
   maxOutputTokens?: number;
   thinkingConfig?: {
-    thinkingLevel: "LOW" | "MEDIUM" | "HIGH";
+    includeThoughts?: boolean;
+    thinkingLevel?: "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+    thinkingBudget?: number;
   };
 };
 
@@ -119,6 +120,7 @@ export type GeminiRequestBody = {
   tools?: { functionDeclarations: GeminiFunctionDeclaration[] }[];
   toolConfig?: GeminiToolConfig;
   sessionId?: string;
+  labels?: Record<string, string>;
 };
 
 export type AntigravityGenerateRequest = {

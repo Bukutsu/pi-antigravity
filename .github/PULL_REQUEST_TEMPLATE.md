@@ -6,7 +6,7 @@
 
 ## Validation
 
-- [ ] `npm run check`
+- [ ] `bun run check`
 - [ ] Tests added or updated when behavior changed
 - [ ] Documentation updated when commands, auth, config, or models changed
 

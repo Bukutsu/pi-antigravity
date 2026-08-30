@@ -1,21 +1,16 @@
 /**
  * Live smoke: hit every registered public model with a tiny prompt.
- * Usage: node --import tsx scripts/smoke-all-models.mjs
- *        FILTER=gemini-3.5-flash node --import tsx scripts/smoke-all-models.mjs
- *        FILTER=gemini-3.7-flash EFFORT=high node --import tsx scripts/smoke-all-models.mjs
- *        CONCURRENCY=2 TIMEOUT_MS=45000 node --import tsx scripts/smoke-all-models.mjs
+ * Usage: bun scripts/smoke-all-models.mjs
+ *        FILTER=gemini-3.5-flash bun scripts/smoke-all-models.mjs
+ *        FILTER=gemini-3.7-flash EFFORT=high bun scripts/smoke-all-models.mjs
+ *        CONCURRENCY=2 TIMEOUT_MS=45000 bun scripts/smoke-all-models.mjs
  */
-import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const root = join(__dirname, "..");
-const authPath = process.env.PI_AUTH_PATH || `${process.env.HOME}/.pi/agent/auth.json`;
+const authPath = Bun.env.PI_AUTH_PATH || `${Bun.env.HOME ?? Bun.env.USERPROFILE}/.pi/agent/auth.json`;
 
 let auth;
 try {
-  auth = JSON.parse(readFileSync(authPath, "utf8"));
+  auth = await Bun.file(authPath).json();
 } catch (err) {
   console.error(`Failed to read/parse auth file ${authPath}: ${err?.message || err}`);
   process.exit(1);
@@ -26,16 +21,16 @@ if (!creds?.refresh) {
   process.exit(1);
 }
 
-const oauth = await import(pathToFileURL(join(root, "src/auth/oauth.ts")).href);
-const client = await import(pathToFileURL(join(root, "src/client/client.ts")).href);
-const utils = await import(pathToFileURL(join(root, "src/utils/util.ts")).href);
-const models = await import(pathToFileURL(join(root, "src/models/models.ts")).href);
+const oauth = await import("../src/auth/oauth.ts");
+const client = await import("../src/client/client.ts");
+const utils = await import("../src/utils/util.ts");
+const models = await import("../src/models/models.ts");
 
-const CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 2));
-const TIMEOUT_MS = Math.max(5000, Number(process.env.TIMEOUT_MS || 60_000));
-const FILTER = (process.env.FILTER || "").trim();
-const EFFORT = (process.env.EFFORT || "off").trim().toLowerCase();
-const PROMPT = process.env.PROMPT || "Reply with exactly one word: pong";
+const CONCURRENCY = Math.max(1, Number(Bun.env.CONCURRENCY || 2));
+const TIMEOUT_MS = Math.max(5000, Number(Bun.env.TIMEOUT_MS || 60_000));
+const FILTER = (Bun.env.FILTER || "").trim();
+const EFFORT = (Bun.env.EFFORT || "off").trim().toLowerCase();
+const PROMPT = Bun.env.PROMPT || "Reply with exactly one word: pong";
 
 console.log(`email=${creds.email || "none"} projectId(auth)=${creds.projectId || "none"}`);
 
@@ -137,9 +132,10 @@ async function smokeOne(publicId) {
     for (let i = 0; i < candidates.length; i++) {
       runtimeModel = candidates[i];
       const isClaude = publicId.startsWith("claude-") || runtimeModel.startsWith("claude-");
-      const generationConfig = { maxOutputTokens: 256 };
-      if (runtimeModel === "gemini-3.7-flash-tiered") {
+      const generationConfig: Record<string, unknown> = { maxOutputTokens: 256 };
+      if (publicId === "gemini-3.7-flash" || publicId === "gemini-3.6-flash") {
         generationConfig.thinkingConfig = {
+          includeThoughts: true,
           thinkingLevel:
             EFFORT === "high" || EFFORT === "xhigh"
               ? "HIGH"
@@ -240,7 +236,7 @@ async function mapPool(items, limit, fn) {
     while (i < items.length) {
       const idx = i++;
       const item = items[idx];
-      process.stdout.write(`→ ${item} ...\n`);
+      console.log(`→ ${item} ...`);
       results[idx] = await fn(item);
       const r = results[idx];
       const mark = r.ok ? "OK " : "FAIL";
@@ -261,8 +257,8 @@ const results = await mapPool(selected, CONCURRENCY, smokeOne);
 const passed = results.filter((r) => r.ok);
 const failed = results.filter((r) => !r.ok);
 
-const outPath = join(__dirname, "smoke-all-models-results.json");
-writeFileSync(
+const outPath = `${import.meta.dir}/smoke-all-models-results.json`;
+await Bun.write(
   outPath,
   JSON.stringify(
     {

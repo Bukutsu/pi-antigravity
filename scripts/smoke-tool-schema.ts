@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import type { Tool } from "@earendil-works/pi-ai";
 import { convertTools } from "../src/stream/index.js";
 import { refreshAntigravityToken } from "../src/auth/index.js";
@@ -15,10 +13,10 @@ type StoredCredentials = {
   email?: string;
 };
 
-const authPath = `${homedir()}/.pi/agent/auth.json`;
+const authPath = `${Bun.env.HOME ?? Bun.env.USERPROFILE}/.pi/agent/auth.json`;
 let auth: { antigravity?: StoredCredentials };
 try {
-  auth = JSON.parse(await readFile(authPath, "utf8")) as { antigravity?: StoredCredentials };
+  auth = (await Bun.file(authPath).json()) as { antigravity?: StoredCredentials };
 } catch (error) {
   const detail = error instanceof Error ? error.message : String(error);
   throw new Error(`Could not load Antigravity credentials from ${authPath}: ${detail}`);

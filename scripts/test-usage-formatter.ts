@@ -1,5 +1,5 @@
 import { formatUsageSummary } from "../src/usage/usage.js";
-import assert from "node:assert";
+import { expect } from "bun:test";
 
 console.log("Running usage formatter tests...");
 
@@ -20,9 +20,8 @@ const out = formatUsageSummary({
   quotaSummaryError: message3501,
 });
 
-assert(
+expect(
   out.includes("needs a paid subscription") || out.includes("free-tier can't use that endpoint"),
-  "Formatter failed to classify #3501 missing license message as a subscription error"
-);
+).toBe(true);
 
 console.log("Usage formatter tests passed!");

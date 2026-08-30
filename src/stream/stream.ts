@@ -42,6 +42,7 @@ import {
   getMaxOutputTokens,
   getAntigravityRequestModelId,
   getFallbackRuntimeModel,
+  getThinkingConfig,
   PROVIDER_ID,
 } from "../models/models.js";
 import { redactSecrets, safeError } from "../utils/security.js";
@@ -61,7 +62,12 @@ import {
   type GeminiTextPart,
   type StreamChunk,
 } from "../types/types.js";
-import { antigravityEnv, isRecord, nowRequestId, sanitizeText } from "../utils/util.js";
+import {
+  antigravityEnv,
+  antigravityRequestEnvelope,
+  isRecord,
+  sanitizeText,
+} from "../utils/util.js";
 import { antigravityFetch } from "../utils/http.js";
 
 export { ANTIGRAVITY_API };
@@ -78,7 +84,7 @@ let toolCallCounter = 0;
 function sanitizeToolCallId(id: string, fallbackName?: string): string {
   const cleaned = id.replace(/[^a-zA-Z0-9_-]/g, "_");
   const capped = cleaned.slice(0, 64);
-  return capped || `${fallbackName || "tool"}_${Date.now()}_${++toolCallCounter}`;
+  return capped || `${fallbackName || "tool"}_${++toolCallCounter}`;
 }
 
 function toolCallIdNeeded(modelId: string, runtimeModel: string): boolean {
@@ -88,6 +94,23 @@ function toolCallIdNeeded(modelId: string, runtimeModel: string): boolean {
     runtimeModel.startsWith("claude-") ||
     runtimeModel.startsWith("gpt-oss-")
   );
+}
+
+const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
+function isValidThoughtSignature(signature?: string): boolean {
+  if (!signature || typeof signature !== "string" || signature.length === 0) return false;
+  if (signature.length % 4 !== 0) return false;
+  return base64SignaturePattern.test(signature);
+}
+
+function geminiRequiresThoughtSignature(runtimeModel: string): boolean {
+  if (!runtimeModel.startsWith("gemini-")) return false;
+  const match = runtimeModel.match(/^gemini-(\d+)/);
+  if (match) {
+    const major = Number.parseInt(match[1], 10);
+    return major >= 3;
+  }
+  return true;
 }
 
 function parseImageData(raw: string, explicitMime?: string): { data: string; mimeType: string } {
@@ -122,6 +145,22 @@ function asTextParts(content: unknown): Array<GeminiTextPart | GeminiInlineDataP
   });
 }
 
+function asImageParts(content: unknown): GeminiInlineDataPart[] {
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((item): GeminiInlineDataPart[] => {
+    if (!isRecord(item)) return [];
+    const block = item as ContentBlock;
+    if (block.type === "image") {
+      const rawData = block.data || block.source?.data;
+      if (!rawData) return [];
+      const explicitMime = block.mimeType || block.mediaType || block.source?.mediaType;
+      const { data, mimeType } = parseImageData(rawData, explicitMime);
+      return data ? [{ inlineData: { mimeType, data } }] : [];
+    }
+    return [];
+  });
+}
+
 function appendTurn(contents: GeminiContent[], role: GeminiRole, parts: GeminiPart[]): void {
   if (!parts.length) return;
   const last = contents[contents.length - 1];
@@ -139,36 +178,74 @@ export function convertMessages(
   runtimeModel: string,
 ): GeminiContent[] {
   const contents: GeminiContent[] = [];
+  const requiresSig = geminiRequiresThoughtSignature(runtimeModel);
+  const droppedToolCallIds = new Map<string, string>();
   for (const msg of context.messages) {
     if (msg.role === "user") {
       const parts = asTextParts(msg.content);
       appendTurn(contents, GeminiRole.User, parts);
     } else if (msg.role === "assistant") {
+      if (msg.stopReason === "error" || msg.stopReason === "aborted") {
+        continue;
+      }
       const parts: GeminiPart[] = [];
+      const isSameModel = msg.provider === PROVIDER_ID && msg.model === model.id;
+      const toolCalls = msg.content.filter((b): b is ToolCall => b.type === "toolCall");
+      const firstCallHasSig =
+        toolCalls.length > 0 && isValidThoughtSignature(toolCalls[0]?.thoughtSignature);
+      const allSigsValid = toolCalls.every(
+        (tc) => !tc.thoughtSignature || isValidThoughtSignature(tc.thoughtSignature),
+      );
+      const groupIsSigned = isSameModel && firstCallHasSig && allSigsValid;
+
       for (const block of msg.content) {
-        if (block.type === "text" && String(block.text || "").trim()) {
-          parts.push({ text: sanitizeText(block.text) });
-        } else if (block.type === "thinking" && String(block.thinking || "").trim()) {
-          if (msg.provider === PROVIDER_ID && msg.model === model.id) {
-            parts.push({
-              thought: true,
-              text: sanitizeText(block.thinking),
-              ...(block.thinkingSignature ? { thoughtSignature: block.thinkingSignature } : {}),
-            });
-          } else {
-            parts.push({ text: sanitizeText(block.thinking) });
+        if (block.type === "text") {
+          const textSig =
+            isSameModel && isValidThoughtSignature(block.textSignature)
+              ? block.textSignature
+              : undefined;
+          if ((!block.text || block.text.trim() === "") && !textSig) {
+            continue;
           }
-        } else if (block.type === "toolCall") {
           parts.push({
-            functionCall: {
-              name: block.name,
-              args: block.arguments ?? {},
-              ...(toolCallIdNeeded(model.id, runtimeModel)
-                ? { id: sanitizeToolCallId(block.id || "", block.name) }
-                : {}),
-            },
-            ...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),
+            text: sanitizeText(block.text),
+            ...(textSig ? { thoughtSignature: textSig } : {}),
           });
+        } else if (block.type === "thinking" && String(block.thinking || "").trim()) {
+          if (!isSameModel) continue;
+          parts.push({
+            thought: true,
+            text: sanitizeText(block.thinking),
+            ...(block.thinkingSignature ? { thoughtSignature: block.thinkingSignature } : {}),
+          });
+        } else if (block.type === "toolCall") {
+          if (requiresSig && !groupIsSigned) {
+            const rawId = block.id || "";
+            const argsText = (() => {
+              try {
+                return JSON.stringify(block.arguments ?? {});
+              } catch {
+                return "{}";
+              }
+            })();
+            if (rawId) {
+              droppedToolCallIds.set(rawId, argsText);
+              droppedToolCallIds.set(sanitizeToolCallId(rawId, block.name), argsText);
+            } else {
+              droppedToolCallIds.set(`empty:${block.name}`, argsText);
+            }
+          } else {
+            parts.push({
+              functionCall: {
+                name: block.name,
+                args: block.arguments ?? {},
+                ...(toolCallIdNeeded(model.id, runtimeModel)
+                  ? { id: sanitizeToolCallId(block.id || "", block.name) }
+                  : {}),
+              },
+              ...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),
+            });
+          }
         }
       }
       appendTurn(contents, GeminiRole.Model, parts);
@@ -178,16 +255,35 @@ export function convertMessages(
         .map((c) => sanitizeText(c.text))
         .join("\n");
       const responseText = text || (msg.isError ? "Tool failed" : "");
-      const part: GeminiFunctionResponsePart = {
-        functionResponse: {
-          name: msg.toolName,
-          response: msg.isError ? { error: responseText } : { output: responseText },
-          ...(toolCallIdNeeded(model.id, runtimeModel)
-            ? { id: sanitizeToolCallId(msg.toolCallId || "", msg.toolName) }
-            : {}),
-        },
-      };
-      appendTurn(contents, GeminiRole.User, [part]);
+      const imageParts = asImageParts(msg.content);
+      const rawId = msg.toolCallId || "";
+      const sanitizedId = toolCallIdNeeded(model.id, runtimeModel)
+        ? sanitizeToolCallId(rawId, msg.toolName)
+        : rawId;
+      const droppedArgs = requiresSig
+        ? (droppedToolCallIds.get(rawId) ??
+          droppedToolCallIds.get(sanitizedId) ??
+          (rawId === "" ? droppedToolCallIds.get(`empty:${msg.toolName}`) : undefined))
+        : undefined;
+      if (droppedArgs !== undefined) {
+        const label =
+          droppedArgs === "{}" ? `\`${msg.toolName}\`` : `\`${msg.toolName}\` (${droppedArgs})`;
+        appendTurn(contents, GeminiRole.User, [
+          { text: sanitizeText(`[Observation from ${label}:\n${responseText}]`) },
+          ...imageParts,
+        ]);
+      } else {
+        const part: GeminiFunctionResponsePart = {
+          functionResponse: {
+            name: msg.toolName,
+            response: msg.isError ? { error: responseText } : { output: responseText },
+            ...(toolCallIdNeeded(model.id, runtimeModel)
+              ? { id: sanitizeToolCallId(msg.toolCallId || "", msg.toolName) }
+              : {}),
+          },
+        };
+        appendTurn(contents, GeminiRole.User, [part, ...imageParts]);
+      }
     }
   }
 
@@ -391,13 +487,8 @@ export function buildRequest(
 
   const generationConfig: GeminiGenerationConfig = {};
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature;
-  if (runtimeModel === "gemini-3.7-flash-tiered") {
-    const effort = options.reasoning ?? "off";
-    generationConfig.thinkingConfig = {
-      thinkingLevel:
-        effort === "high" || effort === "xhigh" ? "HIGH" : effort === "medium" ? "MEDIUM" : "LOW",
-    };
-  }
+  const thinking = getThinkingConfig(model.id, options.reasoning ?? "off");
+  if (thinking) generationConfig.thinkingConfig = thinking;
   const maxAllowed = getMaxOutputTokens(model.id, runtimeModel);
   if (options.maxTokens !== undefined) {
     generationConfig.maxOutputTokens = Math.min(options.maxTokens, maxAllowed);
@@ -406,34 +497,27 @@ export function buildRequest(
   }
   if (Object.keys(generationConfig).length) request.generationConfig = generationConfig;
 
-  const tools = convertTools(
-    context.tools,
-    model.id.startsWith("claude-") || model.id.startsWith("gpt-oss-"),
-  );
+  const isClaude = model.id.startsWith("claude-") || runtimeModel.startsWith("claude-");
+  const tools = convertTools(context.tools, isClaude || model.id.startsWith("gpt-oss-"));
   if (tools) {
     request.tools = tools;
-    if (model.id.startsWith("claude-")) {
-      request.toolConfig = options.toolChoice
-        ? {
-            functionCallingConfig: {
-              mode: mapToolChoiceMode(options.toolChoice),
-            },
-          }
-        : {
-            functionCallingConfig: {
-              mode: GeminiToolCallingMode.Validated,
-            },
-          };
-    } else if (options.toolChoice) {
-      request.toolConfig = {
-        functionCallingConfig: {
-          mode: mapToolChoiceMode(options.toolChoice),
-        },
-      };
-    }
+    request.toolConfig = {
+      functionCallingConfig: {
+        mode:
+          options.toolChoice && options.toolChoice !== ToolChoice.Auto
+            ? mapToolChoiceMode(options.toolChoice)
+            : GeminiToolCallingMode.Validated,
+      },
+    };
+  } else if (isClaude) {
+    request.toolConfig = {
+      functionCallingConfig: { mode: GeminiToolCallingMode.Validated },
+    };
   }
 
-  if (options.sessionId) request.sessionId = options.sessionId;
+  const envelope = antigravityRequestEnvelope(runtimeModel, isClaude);
+  request.sessionId = options.sessionId || envelope.sessionId;
+  request.labels = envelope.labels;
 
   return {
     project: projectId,
@@ -441,7 +525,7 @@ export function buildRequest(
     request,
     requestType: AntigravityRequestType.Agent,
     userAgent: AntigravityUserAgent.Antigravity,
-    requestId: nowRequestId(),
+    requestId: envelope.requestId,
   };
 }
 
@@ -678,6 +762,7 @@ export async function streamResponse(
       }
 
       if (candidate?.finishReason) {
+        output.rawStopReason = candidate.finishReason;
         output.stopReason = blocks.some((b) => b.type === "toolCall")
           ? StopReason.ToolUse
           : mapStopReason(candidate.finishReason);
@@ -686,10 +771,10 @@ export async function streamResponse(
       if (responseData.usageMetadata) {
         const prompt = responseData.usageMetadata.promptTokenCount || 0;
         const cacheRead = responseData.usageMetadata.cachedContentTokenCount || 0;
+        const thoughts = responseData.usageMetadata.thoughtsTokenCount || 0;
         output.usage.input = prompt - cacheRead;
-        output.usage.output =
-          (responseData.usageMetadata.candidatesTokenCount || 0) +
-          (responseData.usageMetadata.thoughtsTokenCount || 0);
+        output.usage.output = (responseData.usageMetadata.candidatesTokenCount || 0) + thoughts;
+        output.usage.reasoning = thoughts;
         output.usage.cacheRead = cacheRead;
         output.usage.totalTokens = responseData.usageMetadata.totalTokenCount || 0;
         // Keep subscription costs at zero (matches model catalog freeCost).
@@ -818,7 +903,6 @@ export function streamAntigravity(
         if (!response || !response.ok) {
           if (antigravityEnv("DEBUG_DUMP") === "1") {
             try {
-              const { writeFileSync } = await import("node:fs");
               const body = JSON.stringify(
                 buildRequest(model, context, projectId, opts, runtimeModel),
               );
@@ -828,7 +912,7 @@ export function streamAntigravity(
               } catch {
                 parsedBody = body;
               }
-              writeFileSync(
+              await Bun.write(
                 "/tmp/antigravity-last-request.json",
                 JSON.stringify(
                   {
@@ -872,6 +956,11 @@ export function streamAntigravity(
       if (!received) throw new Error("Antigravity API returned an empty response");
       setLastLatencyMs(Date.now() - startTime);
       if (output.stopReason === "error" || output.stopReason === "aborted") {
+        const errorDetail = output.rawStopReason
+          ? `Provider stopped with: ${output.rawStopReason}`
+          : "An unknown error occurred";
+        output.errorMessage = output.errorMessage || errorDetail;
+        setLastError(output.errorMessage);
         stream.push({ type: "error", reason: output.stopReason, error: output });
       } else if (output.stopReason === "pending") {
         throw new Error("Antigravity API returned no stop reason");

@@ -1,4 +1,3 @@
-import assert from "node:assert/strict";
 import type { Api, Context, Model, Tool } from "@earendil-works/pi-ai";
 import { defaultProjectId, stableProjectId } from "../src/client/index.js";
 import { StopReason } from "../src/types/enums.js";
@@ -16,16 +15,40 @@ import {
   mapStopReason,
 } from "../src/stream/index.js";
 
+function fail(message: string): never {
+  throw new Error(message);
+}
+
+const assert = {
+  equal(actual: unknown, expected: unknown, message?: string) {
+    if (actual !== expected) fail(message ?? `expected ${String(expected)}, got ${String(actual)}`);
+  },
+  notEqual(actual: unknown, expected: unknown) {
+    if (actual === expected) fail(`expected values not to be equal: ${String(actual)}`);
+  },
+  deepEqual(actual: unknown, expected: unknown, message?: string) {
+    if (!Bun.deepEquals(actual, expected)) {
+      fail(message ?? `expected ${Bun.inspect(expected)}, got ${Bun.inspect(actual)}`);
+    }
+  },
+  ok(value: unknown, message?: string) {
+    if (!value) fail(message ?? "expected a truthy value");
+  },
+  match(actual: string, pattern: RegExp) {
+    if (!pattern.test(actual)) fail(`expected ${actual} to match ${pattern}`);
+  },
+};
+
 const route = (model: string, effort?: string) => getAntigravityRequestModelId(model, effort);
 
 const routeCases: Array<[string, string | undefined, string]> = [
-  ["gemini-3.7-flash", undefined, "gemini-3.7-flash-tiered"],
-  ["gemini-3.7-flash", "off", "gemini-3.7-flash-tiered"],
-  ["gemini-3.7-flash", "minimal", "gemini-3.7-flash-tiered"],
-  ["gemini-3.7-flash", "low", "gemini-3.7-flash-tiered"],
-  ["gemini-3.7-flash", "medium", "gemini-3.7-flash-tiered"],
-  ["gemini-3.7-flash", "high", "gemini-3.7-flash-tiered"],
-  ["gemini-3.7-flash", "xhigh", "gemini-3.7-flash-tiered"],
+  ["gemini-3.7-flash", undefined, "gemini-3.7-flash-low"],
+  ["gemini-3.7-flash", "off", "gemini-3.7-flash-low"],
+  ["gemini-3.7-flash", "minimal", "gemini-3.7-flash-low"],
+  ["gemini-3.7-flash", "low", "gemini-3.7-flash-low"],
+  ["gemini-3.7-flash", "medium", "gemini-3.7-flash-medium"],
+  ["gemini-3.7-flash", "high", "gemini-3.7-flash-high"],
+  ["gemini-3.7-flash", "xhigh", "gemini-3.7-flash-high"],
   ["gemini-3.6-flash", undefined, "gemini-3.6-flash-low"],
   ["gemini-3.6-flash", "off", "gemini-3.6-flash-low"],
   ["gemini-3.6-flash", "minimal", "gemini-3.6-flash-low"],
@@ -36,7 +59,7 @@ const routeCases: Array<[string, string | undefined, string]> = [
   ["gemini-3.5-flash", undefined, "gemini-3.5-flash-extra-low"],
   ["gemini-3.5-flash", "off", "gemini-3.5-flash-extra-low"],
   ["gemini-3.5-flash", "minimal", "gemini-3.5-flash-extra-low"],
-  ["gemini-3.5-flash", "low", "gemini-3.5-flash-low"],
+  ["gemini-3.5-flash", "low", "gemini-3.5-flash-extra-low"],
   ["gemini-3.5-flash", "medium", "gemini-3.5-flash-low"],
   ["gemini-3.5-flash", "high", "gemini-3-flash-agent"],
   ["gemini-3.5-flash", "xhigh", "gemini-3-flash-agent"],
@@ -422,22 +445,219 @@ const reqD = buildRequest(
 );
 assert.equal(reqD.request.generationConfig?.maxOutputTokens, 65535);
 
-// Case E: Gemini 3.7 uses its tiered runtime and sends effort in thinkingConfig.
+// Case E: Gemini 3.7/3.6 send thinkingLevel; 3.5 sends thinkingBudget.
 const flash37Model = { ...model, id: "gemini-3.7-flash", maxTokens: 65536 };
-for (const [reasoning, thinkingLevel] of [
-  ["low", "LOW"],
-  ["medium", "MEDIUM"],
-  ["high", "HIGH"],
+for (const [reasoning, thinkingLevel, runtime] of [
+  ["low", "LOW", "gemini-3.7-flash-low"],
+  ["medium", "MEDIUM", "gemini-3.7-flash-medium"],
+  ["high", "HIGH", "gemini-3.7-flash-high"],
 ] as const) {
-  const request = buildRequest(
-    flash37Model,
-    dummyContext,
-    "test-proj",
-    { reasoning },
-    "gemini-3.7-flash-tiered",
-  );
+  const request = buildRequest(flash37Model, dummyContext, "test-proj", { reasoning }, runtime);
   assert.equal(request.request.generationConfig?.thinkingConfig?.thinkingLevel, thinkingLevel);
+  assert.equal(request.request.generationConfig?.thinkingConfig?.includeThoughts, true);
 }
+
+const flash36 = buildRequest(
+  { ...model, id: "gemini-3.6-flash", maxTokens: 65536 },
+  dummyContext,
+  "test-proj",
+  { reasoning: "medium" },
+  "gemini-3.6-flash-medium",
+);
+assert.equal(flash36.request.generationConfig?.thinkingConfig?.thinkingLevel, "MEDIUM");
+
+const flash35 = buildRequest(
+  { ...model, id: "gemini-3.5-flash", maxTokens: 65536 },
+  dummyContext,
+  "test-proj",
+  { reasoning: "medium" },
+  "gemini-3.5-flash-low",
+);
+assert.equal(flash35.request.generationConfig?.thinkingConfig?.thinkingBudget, 4000);
+assert.match(flash35.requestId, /^agent\//);
+assert.ok(flash35.request.labels?.trajectory_id);
+
+const zeroUsage = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+const geminiRuntime = "gemini-3.7-flash-low";
+const validSig = "QkFTRTY0LXRlc3Qtc2lnbmF0dXJlLXRlc3QxMjM0NTY=";
+
+const multimodalResultContext = {
+  messages: [
+    { role: "user", content: "take screenshot", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "call-shot",
+          name: "screenshot",
+          arguments: {},
+          thoughtSignature: validSig,
+        },
+      ],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "gemini-3.7-flash",
+      usage: zeroUsage,
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call-shot",
+      toolName: "screenshot",
+      content: [
+        { type: "text", text: "captured" },
+        { type: "image", data: "data:image/png;base64,iVBORw0KGgo=", mimeType: "image/png" },
+      ],
+      isError: false,
+      timestamp: Date.now(),
+    },
+  ],
+} as unknown as Context;
+const convertedMultimodal = convertMessages(flash37Model, multimodalResultContext, geminiRuntime);
+assert.equal(convertedMultimodal.length, 3);
+assert.equal(convertedMultimodal[2]?.role, "user");
+assert.equal(convertedMultimodal[2]?.parts.length, 2);
+assert.ok(convertedMultimodal[2]?.parts.some((p) => "functionResponse" in p));
+assert.ok(
+  convertedMultimodal[2]?.parts.some((p) => "inlineData" in p && p.inlineData.mimeType === "image/png"),
+);
+
+const crossThinkingContext = {
+  messages: [
+    { role: "user", content: "hi", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "cross model internal monologue" },
+        { type: "text", text: "visible answer" },
+      ],
+      api: "anthropic-messages",
+      provider: "anthropic",
+      model: "claude-opus-4-6",
+      usage: zeroUsage,
+      stopReason: "stop",
+      timestamp: Date.now(),
+    },
+  ],
+} as unknown as Context;
+const convertedCross = convertMessages(flash37Model, crossThinkingContext, geminiRuntime);
+assert.equal(convertedCross[1]?.parts.length, 1);
+assert.deepEqual(convertedCross[1]?.parts[0], { text: "visible answer" });
+
+const unsignedToolContext = {
+  messages: [
+    { role: "user", content: "read file", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [
+        { type: "toolCall", id: "call-prev-1", name: "read", arguments: { path: "main.ts" } },
+      ],
+      api: "openai-responses",
+      provider: "openai",
+      model: "gpt-4o",
+      usage: zeroUsage,
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call-prev-1",
+      toolName: "read",
+      content: [{ type: "text", text: "file content" }],
+      isError: false,
+      timestamp: Date.now(),
+    },
+  ],
+} as unknown as Context;
+const convertedUnsigned = convertMessages(flash37Model, unsignedToolContext, geminiRuntime);
+assert.equal(convertedUnsigned.length, 1);
+assert.equal(convertedUnsigned[0]?.role, "user");
+assert.ok(
+  convertedUnsigned[0]?.parts.some((p) => "text" in p && p.text.includes("Observation from `read`")),
+);
+
+const parallelSignedContext = {
+  messages: [
+    { role: "user", content: "read two files", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "call-1",
+          name: "read",
+          arguments: { path: "a.ts" },
+          thoughtSignature: validSig,
+        },
+        { type: "toolCall", id: "call-2", name: "read", arguments: { path: "b.ts" } },
+      ],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "gemini-3.7-flash",
+      usage: zeroUsage,
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call-1",
+      toolName: "read",
+      content: [{ type: "text", text: "content a" }],
+      isError: false,
+      timestamp: Date.now(),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call-2",
+      toolName: "read",
+      content: [{ type: "text", text: "content b" }],
+      isError: false,
+      timestamp: Date.now(),
+    },
+  ],
+} as unknown as Context;
+const convertedParallel = convertMessages(flash37Model, parallelSignedContext, geminiRuntime);
+assert.equal(convertedParallel.length, 3);
+assert.equal(convertedParallel[1]?.role, "model");
+assert.equal(convertedParallel[1]?.parts.length, 2);
+assert.ok(
+  convertedParallel[1]?.parts.every((p) => "functionCall" in p),
+  "all parallel calls in signed turn remain functionCalls",
+);
+assert.equal(convertedParallel[2]?.role, "user");
+assert.equal(convertedParallel[2]?.parts.length, 2);
+assert.ok(
+  convertedParallel[2]?.parts.every((p) => "functionResponse" in p),
+  "all parallel results remain functionResponses",
+);
+
+const abortedContext = {
+  messages: [
+    { role: "user", content: "hi", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "partial" }],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "gemini-3.7-flash",
+      usage: zeroUsage,
+      stopReason: "aborted",
+      timestamp: Date.now(),
+    },
+  ],
+} as unknown as Context;
+const convertedAborted = convertMessages(flash37Model, abortedContext, geminiRuntime);
+assert.equal(convertedAborted.length, 1);
+assert.equal(convertedAborted[0]?.role, "user");
 
 console.log(
   `model routing: ${routeCases.length} cases, tool schema, errors, project ids, token clamping, and message conversion passed`,

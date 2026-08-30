@@ -19,9 +19,6 @@ export const PROVIDER_NAME = "Antigravity";
  *
  * Pi exposes those as public model IDs and only surfaces the exact thinking levels
  * advertised by the backend for each model.
- *
- * Note: Gemini 3.7 Flash is exposed by Cloud Code Assist as one tiered runtime.
- * The requested thinking effort is sent separately in generationConfig.thinkingConfig.
  */
 export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
   "claude-opus-4-6": {
@@ -59,17 +56,15 @@ export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
     defaultRequestId: "gemini-3.1-pro-low",
   },
   "gemini-3.7-flash": {
-    // `agy models` presents Low/Medium/High labels, but fetchAvailableModels exposes
-    // one requestable runtime ID. Thinking effort belongs in thinkingConfig.
-    off: "gemini-3.7-flash-tiered",
+    off: "gemini-3.7-flash-low",
     routing: {
-      minimal: "gemini-3.7-flash-tiered",
-      low: "gemini-3.7-flash-tiered",
-      medium: "gemini-3.7-flash-tiered",
-      high: "gemini-3.7-flash-tiered",
-      xhigh: "gemini-3.7-flash-tiered",
+      minimal: "gemini-3.7-flash-low",
+      low: "gemini-3.7-flash-low",
+      medium: "gemini-3.7-flash-medium",
+      high: "gemini-3.7-flash-high",
+      xhigh: "gemini-3.7-flash-high",
     },
-    defaultRequestId: "gemini-3.7-flash-tiered",
+    defaultRequestId: "gemini-3.7-flash-low",
   },
   "gemini-3.6-flash": {
     // agy models: gemini-3.6-flash-low / -medium / -high
@@ -84,11 +79,10 @@ export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
     defaultRequestId: "gemini-3.6-flash-low",
   },
   "gemini-3.5-flash": {
-    // Production still uses extra-low / low / gemini-3-flash-agent for Low/Medium/High.
     off: "gemini-3.5-flash-extra-low",
     routing: {
       minimal: "gemini-3.5-flash-extra-low",
-      low: "gemini-3.5-flash-low",
+      low: "gemini-3.5-flash-extra-low",
       medium: "gemini-3.5-flash-low",
       high: "gemini-3-flash-agent",
       xhigh: "gemini-3-flash-agent",
@@ -316,6 +310,51 @@ export function getFallbackRuntimeModel(runtimeModel: string, effort?: string): 
   }
   if (runtimeModel === "gemini-3.7-flash") {
     return "gemini-3.6-flash-low";
+  }
+  return undefined;
+}
+
+export type GeminiThinkingLevel = "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+
+export type ThinkingWire = {
+  includeThoughts: boolean;
+  thinkingLevel?: GeminiThinkingLevel;
+  thinkingBudget?: number;
+};
+
+export const ANTIGRAVITY_MODEL_ENUM: Record<string, string> = {
+  "gemini-3.5-flash-extra-low": "MODEL_PLACEHOLDER_M187",
+  "gemini-3.5-flash-low": "MODEL_PLACEHOLDER_M20",
+  "gemini-3-flash-agent": "MODEL_PLACEHOLDER_M132",
+  "gemini-3.1-pro-low": "MODEL_PLACEHOLDER_M36",
+  "gemini-pro-agent": "MODEL_PLACEHOLDER_M16",
+};
+
+function googleLevel(effort: string | undefined): GeminiThinkingLevel {
+  if (effort === "high" || effort === "xhigh") return "HIGH";
+  if (effort === "medium") return "MEDIUM";
+  return "LOW";
+}
+
+export function getThinkingConfig(
+  modelId: string,
+  effort: string | undefined,
+): ThinkingWire | undefined {
+  if (modelId === "gemini-3.7-flash" || modelId === "gemini-3.6-flash") {
+    return { includeThoughts: true, thinkingLevel: googleLevel(effort) };
+  }
+  if (modelId === "gemini-3.5-flash") {
+    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
+    const thinkingBudget =
+      effort === "high" || effort === "xhigh" ? 10_000 : effort === "medium" ? 4_000 : 1_000;
+    return { includeThoughts: true, thinkingBudget };
+  }
+  if (modelId === "gemini-3.1-pro") {
+    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
+    return {
+      includeThoughts: true,
+      thinkingBudget: effort === "high" || effort === "xhigh" ? 10_001 : 1_001,
+    };
   }
   return undefined;
 }

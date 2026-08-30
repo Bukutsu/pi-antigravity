@@ -1,8 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { fileURLToPath } from "node:url";
-
-const auth = JSON.parse(readFileSync(`${homedir()}/.pi/agent/auth.json`, "utf8"));
+const auth = await Bun.file(`${Bun.env.HOME ?? Bun.env.USERPROFILE}/.pi/agent/auth.json`).json();
 const creds = auth.antigravity;
 const authMod = await import(new URL("../src/auth/oauth.ts", import.meta.url).href);
 const client = await import(new URL("../src/client/client.ts", import.meta.url).href);
@@ -124,8 +120,8 @@ const safe = results.map((r) => ({
   ),
 }));
 
-writeFileSync(
-  fileURLToPath(new URL("./probe-results.json", import.meta.url)),
+await Bun.write(
+  `${import.meta.dir}/probe-results.json`,
   JSON.stringify({ projectId, endpoint, results: safe }, null, 2),
 );
 console.log("\nWrote probe-results.json");

@@ -119,9 +119,11 @@ async function main() {
       `chunk size ${size}: tool call name`,
     );
     assert(output.stopReason === "toolUse", `chunk size ${size}: stopReason ${output.stopReason}`);
+    assert(output.rawStopReason === "STOP", `chunk size ${size}: rawStopReason ${output.rawStopReason}`);
     assert(output.usage.input === 60, `chunk size ${size}: input ${output.usage.input}`);
     assert(output.usage.cacheRead === 40, `chunk size ${size}: cacheRead`);
     assert(output.usage.output === 10, `chunk size ${size}: output ${output.usage.output}`);
+    assert(output.usage.reasoning === 3, `chunk size ${size}: reasoning ${output.usage.reasoning}`);
     assert(output.usage.totalTokens === 110, `chunk size ${size}: totalTokens`);
 
     // Chunk boundaries must not change the emitted event sequence.
@@ -141,7 +143,4 @@ async function main() {
   console.log(`stream SSE: ${sizes.length} chunk-boundary cases passed`);
 }
 
-void main().catch((error: unknown) => {
-  console.error(error);
-  process.exit(1);
-});
+void main();

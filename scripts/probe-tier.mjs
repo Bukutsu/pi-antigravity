@@ -1,8 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { fileURLToPath } from "node:url";
-
-const auth = JSON.parse(readFileSync(`${homedir()}/.pi/agent/auth.json`, "utf8"));
+const auth = await Bun.file(`${Bun.env.HOME ?? Bun.env.USERPROFILE}/.pi/agent/auth.json`).json();
 const creds = auth.antigravity;
 const authMod = await import(new URL("../src/auth/oauth.ts", import.meta.url).href);
 const client = await import(new URL("../src/client/client.ts", import.meta.url).href);
@@ -186,8 +182,8 @@ const summary = {
   ),
 };
 
-writeFileSync(
-  fileURLToPath(new URL("./probe-tier-results.json", import.meta.url)),
+await Bun.write(
+  `${import.meta.dir}/probe-tier-results.json`,
   JSON.stringify(sanitize(out), null, 2),
 );
 console.log(JSON.stringify(summary, null, 2));
