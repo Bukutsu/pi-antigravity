@@ -1,7 +1,7 @@
 import { ANTIGRAVITY_MODEL_ENUM } from "../models/models.js";
 
 export function antigravityEnv(name: string): string | undefined {
-  return Bun.env[`ANTIGRAVITY_${name}`] || Bun.env[`NOAGY_${name}`];
+  return process.env[`ANTIGRAVITY_${name}`] || process.env[`NOAGY_${name}`];
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

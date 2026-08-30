@@ -1,3 +1,4 @@
+import type { Server } from "node:http";
 import type {
   OAuthCredentials,
   SimpleStreamOptions,
@@ -33,7 +34,7 @@ export type DynamicModelInfo = {
 };
 
 export type CallbackServer = {
-  server: ReturnType<typeof Bun.serve>;
+  server: Server;
   waitForCode: () => Promise<{ code: string; state: string }>;
   cleanup: () => void;
 };

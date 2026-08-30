@@ -912,7 +912,9 @@ export function streamAntigravity(
               } catch {
                 parsedBody = body;
               }
-              await Bun.write(
+              await (
+                await import("node:fs/promises")
+              ).writeFile(
                 "/tmp/antigravity-last-request.json",
                 JSON.stringify(
                   {

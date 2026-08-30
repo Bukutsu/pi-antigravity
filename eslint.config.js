@@ -14,7 +14,7 @@ export default tseslint.config(
       ecmaVersion: 2022,
       sourceType: "module",
       globals: {
-        ...globals.bun,
+        ...globals.node,
       },
       parserOptions: {
         projectService: true,
