@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-02
+
 ### Added
 
 - **Live cost tracking:** Model catalog now includes standard API-equivalent rates, and streams report calculated usage cost so Pi's statusline is no longer stuck at `$0.00` (#30).
