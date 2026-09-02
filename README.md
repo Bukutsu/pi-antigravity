@@ -77,16 +77,19 @@ Review these permissions before approving access. If your credentials expire or 
 
 ## Commands
 
-| Command                         | Description                                                                                      |
-| ------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `/login antigravity`            | Sign in to Google and configure the provider.                                                    |
-| `/model antigravity/<model-id>` | Choose a registered Antigravity model.                                                           |
-| `/antigravity.usage`            | Show the server-reported shared quota groups and reset times.                                    |
-| `/antigravity.models`           | List available runtime models, remaining shared-pool quota, and capabilities.                    |
-| `/antigravity.models all`       | Include tab/chat models normally hidden from the model list.                                     |
-| `/antigravity.doctor`           | Show sanitized provider diagnostics, including the endpoint, status, and resolved runtime model. |
+| Command                         | Description                                                                                                                |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `/login antigravity`            | Sign in to Google and configure the provider.                                                                              |
+| `/model antigravity/<model-id>` | Choose a registered Antigravity model.                                                                                     |
+| `/antigravity.usage`            | Show the server-reported shared quota groups and reset times.                                                              |
+| `/antigravity.models`           | List available runtime models, remaining shared-pool quota, and capabilities.                                              |
+| `/antigravity.models all`       | Include tab/chat models normally hidden from the model list.                                                               |
+| `/antigravity.doctor`           | Show sanitized provider diagnostics, including the endpoint, status, and resolved runtime model.                           |
+| `/antigravity.image <prompt>`   | Generate an image via Antigravity and save it under `.pi/generated-images/`. Optional `--ratio 16:9`, `--model`, `--path`. |
 
 Model availability, entitlement, quota groups, and resets are returned by the service and can differ by account. The quota percentage shown for a model can represent a shared pool, not a private per-model allowance.
+
+The extension also registers a `generate_image` tool the model can call. Images are written inside the project directory (default `.pi/generated-images/`). Image models such as `gemini-3-pro-image` are account-dependent; `/antigravity.image` falls back to other advertised Gemini image IDs on 404.
 
 ## Models and routing
 

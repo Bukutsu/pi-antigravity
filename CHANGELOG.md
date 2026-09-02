@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Live cost tracking:** Model catalog now includes standard API-equivalent rates, and streams report calculated usage cost so Pi's statusline is no longer stuck at `$0.00` (#30).
+- **Image generation:** `/antigravity.image` and the `generate_image` tool create images through Cloud Code Assist using the signed-in Antigravity account (#21).
+
+### Changed
+
+- **System prompt:** When Pi provides `context.systemPrompt`, it is sent as `systemInstruction` without the hardcoded Antigravity persona prefix (#27).
+
 ## [0.5.2] - 2026-08-30
 
 ### Fixed

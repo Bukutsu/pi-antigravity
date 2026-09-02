@@ -659,6 +659,27 @@ const convertedAborted = convertMessages(flash37Model, abortedContext, geminiRun
 assert.equal(convertedAborted.length, 1);
 assert.equal(convertedAborted[0]?.role, "user");
 
+const withPiPrompt = buildRequest(
+  flash37Model,
+  { ...dummyContext, systemPrompt: "You are Pi. Follow AGENTS.md." },
+  "test-proj",
+  {},
+  "gemini-3.7-flash-low",
+);
+assert.equal(withPiPrompt.request.systemInstruction.parts.length, 1);
+assert.equal(withPiPrompt.request.systemInstruction.parts[0]?.text, "You are Pi. Follow AGENTS.md.");
+
+const fallbackPersona = buildRequest(flash37Model, dummyContext, "test-proj", {}, "gemini-3.7-flash-low");
+assert.equal(fallbackPersona.request.systemInstruction.parts.length, 2);
+assert.match(fallbackPersona.request.systemInstruction.parts[0]?.text || "", /You are Antigravity/);
+
+const flashCost = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.7-flash")?.cost;
+assert.equal(flashCost?.input, 0.1);
+assert.equal(flashCost?.output, 0.4);
+const opusCost = ANTIGRAVITY_MODELS.find((m) => m.id === "claude-opus-4-6")?.cost;
+assert.equal(opusCost?.input, 15);
+assert.equal(opusCost?.output, 75);
+
 console.log(
   `model routing: ${routeCases.length} cases, tool schema, errors, project ids, token clamping, and message conversion passed`,
 );

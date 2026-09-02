@@ -13,6 +13,7 @@ const pi = {
   registerCommand(name, cfg) {
     commands.push({ name, description: cfg.description });
   },
+  registerTool() {},
   unregisterProvider() {},
 };
 
