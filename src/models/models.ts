@@ -1,6 +1,7 @@
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type { AntigravityRouting } from "../types/types.js";
 import { ThinkingEffort } from "../types/enums.js";
+import type { AntigravityCatalog } from "./grouping.js";
 
 export const PROVIDER_ID = "antigravity";
 export const PROVIDER_NAME = "Antigravity";
@@ -295,9 +296,34 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
   },
 ];
 
+let currentModels: ProviderModelConfig[] = ANTIGRAVITY_MODELS;
+let currentRouting: Record<string, AntigravityRouting> = { ...ANTIGRAVITY_ROUTING };
+
+export function getCurrentAntigravityModels(): ProviderModelConfig[] {
+  return currentModels;
+}
+
+export function getCurrentAntigravityRouting(): Record<string, AntigravityRouting> {
+  return currentRouting;
+}
+
+export function getCurrentAntigravityCatalog(): AntigravityCatalog {
+  return { models: currentModels, routing: currentRouting };
+}
+
+export function applyAntigravityCatalog(catalog: AntigravityCatalog): void {
+  currentModels = catalog.models;
+  currentRouting = catalog.routing;
+}
+
+export function resetAntigravityCatalogForTests(): void {
+  currentModels = ANTIGRAVITY_MODELS;
+  currentRouting = { ...ANTIGRAVITY_ROUTING };
+}
+
 /** Resolve public model id + thinking effort to Antigravity runtime model id. */
 export function getAntigravityRequestModelId(modelId: string, effort: string | undefined): string {
-  const r = ANTIGRAVITY_ROUTING[modelId];
+  const r = currentRouting[modelId] ?? ANTIGRAVITY_ROUTING[modelId];
   if (!r) return modelId;
 
   if (effort === undefined || effort === "off") {
@@ -376,13 +402,6 @@ export function getThinkingConfig(
   modelId: string,
   effort: string | undefined,
 ): ThinkingWire | undefined {
-  if (
-    modelId === "gemini-3.8-flash" ||
-    modelId === "gemini-3.7-flash" ||
-    modelId === "gemini-3.6-flash"
-  ) {
-    return { includeThoughts: true, thinkingLevel: googleLevel(effort) };
-  }
   if (modelId === "gemini-3.5-flash") {
     if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
     const thinkingBudget =
@@ -395,6 +414,10 @@ export function getThinkingConfig(
       includeThoughts: true,
       thinkingBudget: effort === "high" || effort === "xhigh" ? 10_001 : 1_001,
     };
+  }
+  if (modelId.startsWith("gemini-")) {
+    if (!effort || effort === "off") return { includeThoughts: false };
+    return { includeThoughts: true, thinkingLevel: googleLevel(effort) };
   }
   return undefined;
 }

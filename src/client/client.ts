@@ -11,7 +11,7 @@ import {
   setLastStatus,
 } from "../diagnostics/diagnostics.js";
 import { assertSafeApiBaseUrl, safeError } from "../utils/security.js";
-import type { AntigravityApiKey, DynamicModelInfo } from "../types/types.js";
+import type { AntigravityApiKey, AvailableModelsRaw, DynamicModelInfo } from "../types/types.js";
 import { antigravityEnv, asString, escapeRegExp, isRecord } from "../utils/util.js";
 import { antigravityFetch } from "../utils/http.js";
 
@@ -389,6 +389,113 @@ export async function fetchAvailableRuntimeModel(
 
 export function clearModelCache(): void {
   modelCache.clear();
+}
+
+function jsonHeaders(token: string): Record<string, string> {
+  return {
+    ...antigravityHeaders(token),
+    Accept: "application/json",
+  };
+}
+
+async function fetchAvailableModelsFromEndpoint(
+  endpoint: string,
+  token: string,
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<{ endpoint: string; status: number; data: unknown } | undefined> {
+  try {
+    const res = await antigravityFetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+      method: "POST",
+      headers: jsonHeaders(token),
+      body: JSON.stringify({ project: projectId }),
+      signal: catalogSignal(signal),
+    });
+    const text = await res.text();
+    let data: unknown;
+    try {
+      data = JSON.parse(text) as unknown;
+    } catch {
+      data = { raw: text };
+    }
+    if (!res.ok) {
+      const message =
+        isRecord(data) && isRecord(data.error) && typeof data.error.message === "string"
+          ? data.error.message
+          : text;
+      setLastError(message);
+      return undefined;
+    }
+    return { endpoint, status: res.status, data };
+  } catch (error) {
+    setLastError(safeError(error));
+    return undefined;
+  }
+}
+
+function catalogSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(DISCOVERY_TIMEOUT_MS);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+/** Merge catalog payloads from one or more fetchAvailableModels responses. */
+export function mergeAvailableModelsResults(
+  results: Array<{ endpoint: string; status: number; data: unknown } | undefined>,
+): { endpoint: string; status: number; data: AvailableModelsRaw } {
+  const mergedModels: Record<string, unknown> = {};
+  let defaultAgentModelId: string | undefined;
+  let defaultAgentModel: string | undefined;
+  let lastEndpoint = "";
+  let lastStatus = 0;
+
+  for (const result of results) {
+    if (!result) continue;
+    setLastEndpoint(result.endpoint);
+    setLastStatus(result.status);
+    lastEndpoint = result.endpoint;
+    lastStatus = result.status;
+    const data = result.data;
+    if (isRecord(data) && isRecord(data.models)) {
+      Object.assign(mergedModels, data.models);
+    }
+    if (isRecord(data) && typeof data.defaultAgentModelId === "string") {
+      defaultAgentModelId = data.defaultAgentModelId;
+    }
+    if (isRecord(data) && typeof data.defaultAgentModel === "string") {
+      defaultAgentModel = data.defaultAgentModel;
+    }
+  }
+
+  if (!lastEndpoint) {
+    throw new Error(`/v1internal:fetchAvailableModels failed: no endpoint available`);
+  }
+
+  return {
+    endpoint: lastEndpoint,
+    status: lastStatus,
+    data: {
+      models: mergedModels as AvailableModelsRaw["models"],
+      defaultAgentModelId,
+      defaultAgentModel,
+    },
+  };
+}
+
+/**
+ * Merge fetchAvailableModels across endpoint candidates so daily/sandbox-only
+ * models appear alongside production catalog entries.
+ */
+export async function fetchAvailableModelsCatalog(
+  token: string,
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<{ endpoint: string; status: number; data: AvailableModelsRaw }> {
+  const results = await Promise.all(
+    endpointCandidates().map((endpoint) =>
+      fetchAvailableModelsFromEndpoint(endpoint, token, projectId, signal),
+    ),
+  );
+  return mergeAvailableModelsResults(results);
 }
 
 async function loadCodeAssistUncached(token: string): Promise<string | undefined> {
