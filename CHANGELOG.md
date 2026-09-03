@@ -8,6 +8,17 @@ All notable changes to this project are documented in this file.
 
 - **Dynamic model discovery:** The selectable catalog is refreshed from authenticated `fetchAvailableModels` and grouped into public Pi IDs, so newly enabled models can appear without a catalog-only release. Last-known-good cache plus a conservative static seed remain for cold start. Discovery does not add a new cross-generation fallback; existing Gemini rollout remaps are unchanged.
 
+## [0.7.1] - 2026-09-03
+
+### Added
+
+- **Dynamic model discovery:** Refresh the selectable catalog from authenticated `fetchAvailableModels`, group runtime thinking variants into public Pi model IDs, and retain a last-known-good cache with conservative static fallback models.
+
+### Fixed
+
+- **Tool schema references:** Resolve local JSON Schema `$ref` pointers, including nested, escaped, repeated, cyclic, and array-index references, while isolating invalid tool declarations and reporting diagnostics.
+- **Gemini reasoning:** Respect reasoning-off selections for dynamically discovered Gemini models.
+
 ## [0.7.0] - 2026-09-02
 
 ### Added
