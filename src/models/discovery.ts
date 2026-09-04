@@ -12,6 +12,19 @@ import {
 } from "./models.js";
 import { isUsableCatalog, readCatalogCache, writeCatalogCache } from "./cache.js";
 import { buildAntigravityCatalog, resolvedCatalog, type AntigravityCatalog } from "./grouping.js";
+import { antigravityEnv } from "../utils/util.js";
+
+export const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000;
+
+export function getCatalogRefreshIntervalMs(): number {
+  const envVal =
+    antigravityEnv("CATALOG_REFRESH_INTERVAL_MS") ?? antigravityEnv("REFRESH_INTERVAL_MS");
+  if (envVal) {
+    const parsed = Number.parseInt(envVal, 10);
+    if (!Number.isNaN(parsed) && parsed >= 0) return parsed;
+  }
+  return DEFAULT_CATALOG_REFRESH_INTERVAL_MS;
+}
 
 const fallbackCatalog = (): AntigravityCatalog => ({
   models: ANTIGRAVITY_MODELS,
@@ -35,7 +48,10 @@ export async function discoverAntigravityModels(
 ): Promise<AntigravityCatalog> {
   const creds = parseApiKey(apiKey);
   const available = await fetchAvailableModelsCatalog(creds.token, creds.projectId, signal);
-  const models = available.data.models ?? {};
+  const models = available.data.models;
+  if (!models || Object.keys(models).length === 0) {
+    return { models: [], routing: {} };
+  }
   return buildAntigravityCatalog(models, fallbackCatalog());
 }
 
@@ -52,10 +68,25 @@ export async function refreshAntigravityModels(
     return current.models;
   }
 
+  const lastCheckedAt = Math.max(
+    context.stored?.checkedAt ?? 0,
+    readCatalogCache()?.checkedAt ?? 0,
+  );
+  const now = Date.now();
+  if (
+    !context.force &&
+    lastCheckedAt > 0 &&
+    now >= lastCheckedAt &&
+    now - lastCheckedAt < getCatalogRefreshIntervalMs()
+  ) {
+    return current.models;
+  }
+
   try {
     const discovered = await discoverAntigravityModels(apiKey, context.signal);
+    if (context.signal.aborted) return current.models;
     const next = resolvedCatalog(discovered, current);
-    if (next !== current && isUsableCatalog(next)) {
+    if (isUsableCatalog(discovered)) {
       applyAntigravityCatalog(next);
       writeCatalogCache(next);
       await context.publish({
@@ -66,8 +97,10 @@ export async function refreshAntigravityModels(
       });
       return next.models;
     }
-  } catch {
+  } catch (error) {
     // Keep last-known-good models; a failed refresh must not wipe the catalog.
+    // Forced/manual refreshes must still report the failure to their caller.
+    if (context.force) throw error;
   }
 
   return getCurrentAntigravityCatalog().models;

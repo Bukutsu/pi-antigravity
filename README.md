@@ -68,27 +68,30 @@ The callback listener binds only to a loopback host, so it isn't reachable from 
 
 Signing in requests these Google OAuth scopes:
 
-| Scope                                | Why it's needed                                                           |
-| ------------------------------------ | ------------------------------------------------------------------------- |
-| `aicode`                             | Access to the Cloud Code Assist / Antigravity model catalog and endpoints |
-| `cloud-platform`                     | General Cloud Code Assist API access                                      |
-| `userinfo.email`, `userinfo.profile` | Identify the signed-in Google account                                     |
-| `cclog`                              | Cloud Code Assist logging/telemetry endpoints used by the API             |
-| `experimentsandconfigs`              | Server-side experiment and config flags for the API                       |
+<!-- prettier-ignore -->
+| Scope | Why it's needed |
+| --- | --- |
+| `aicode` | Access to the Cloud Code Assist / Antigravity model catalog and endpoints |
+| `cloud-platform` | General Cloud Code Assist API access |
+| `userinfo.email`, `userinfo.profile` | Identify the signed-in Google account |
+| `cclog` | Cloud Code Assist logging/telemetry endpoints used by the API |
+| `experimentsandconfigs` | Server-side experiment and config flags for the API |
 
 Review these permissions before approving access. If your credentials expire or are revoked, just re-run `/login antigravity` to sign in again.
 
 ## Commands
 
-| Command                         | Description                                                                                                                |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `/login antigravity`            | Sign in to Google and configure the provider.                                                                              |
-| `/model antigravity/<model-id>` | Choose a registered Antigravity model.                                                                                     |
-| `/antigravity.usage`            | Show the server-reported shared quota groups and reset times.                                                              |
-| `/antigravity.models`           | List available runtime models, remaining shared-pool quota, and capabilities.                                              |
-| `/antigravity.models all`       | Include tab/chat models normally hidden from the model list.                                                               |
-| `/antigravity.doctor`           | Show sanitized provider diagnostics, including the endpoint, status, and resolved runtime model.                           |
-| `/antigravity.image <prompt>`   | Generate an image via Antigravity and save it under `.pi/generated-images/`. Optional `--ratio 16:9`, `--model`, `--path`. |
+<!-- prettier-ignore -->
+| Command | Description |
+| --- | --- |
+| `/login antigravity` | Sign in to Google and configure the provider. |
+| `/model antigravity/<model-id>` | Choose a registered Antigravity model. |
+| `/antigravity.usage` | Show the server-reported shared quota groups and reset times. |
+| `/antigravity.models` | List available runtime models, remaining shared-pool quota, and capabilities. |
+| `/antigravity.models all` | Include tab/chat models normally hidden from the model list. |
+| `/antigravity.refresh` | Force refresh the dynamic model catalog from Antigravity. |
+| `/antigravity.doctor` | Show sanitized provider diagnostics, including the endpoint, status, and resolved runtime model. |
+| `/antigravity.image <prompt>` | Generate an image via Antigravity and save it under `.pi/generated-images/`. Optional `--ratio 16:9`, `--model`, `--path`. |
 
 Model availability, entitlement, quota groups, and resets are returned by the service and can differ by account. The quota percentage shown for a model can represent a shared pool, not a private per-model allowance.
 
@@ -106,16 +109,17 @@ Antigravity / Cloud Code Assist exposes a multi-provider catalog. Depending on y
 
 The backend's display labels do not always match its runtime IDs. For example, `gemini-3.5-flash-extra-low`, `gemini-3.5-flash-low`, and `gemini-3-flash-agent` can be displayed as Gemini 3.5 Flash Low, Medium, and High. Gemini 3.8, 3.7, and 3.6 Flash use per-effort runtime IDs and send `thinkingLevel`; Gemini 3.5 Flash and 3.1 Pro send `thinkingBudget`.
 
-| Public model ID     | Input       | Thinking levels shown | Max output tokens | Request routing                                                                                    |
-| ------------------- | ----------- | --------------------- | ----------------- | -------------------------------------------------------------------------------------------------- |
-| `gemini-3.8-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.8-flash-low`; medium → `gemini-3.8-flash-medium`; high → `gemini-3.8-flash-high`   |
-| `gemini-3.7-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.7-flash-low`; medium → `gemini-3.7-flash-medium`; high → `gemini-3.7-flash-high`   |
-| `gemini-3.6-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.6-flash-low`; medium → `gemini-3.6-flash-medium`; high → `gemini-3.6-flash-high`   |
-| `gemini-3.5-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.5-flash-extra-low`; medium → `gemini-3.5-flash-low`; high → `gemini-3-flash-agent` |
-| `gemini-3.1-pro`    | Text, image | Low, High             | 65,535            | low → `gemini-3.1-pro-low`; high → `gemini-pro-agent`                                              |
-| `claude-sonnet-4-6` | Text, image | High                  | 64,000            | high → `claude-sonnet-4-6`                                                                         |
-| `claude-opus-4-6`   | Text, image | High                  | 64,000            | high → `claude-opus-4-6-thinking`                                                                  |
-| `gpt-oss-120b`      | Text        | Medium                | 32,768            | medium → `gpt-oss-120b-medium`                                                                     |
+<!-- prettier-ignore -->
+| Public model ID | Input | Thinking levels shown | Max output tokens | Request routing |
+| --- | --- | --- | --- | --- |
+| `gemini-3.8-flash` | Text, image | Low, Medium, High | 65,536 | low → `gemini-3.8-flash-low`; medium → `gemini-3.8-flash-medium`; high → `gemini-3.8-flash-high` |
+| `gemini-3.7-flash` | Text, image | Low, Medium, High | 65,536 | low → `gemini-3.7-flash-low`; medium → `gemini-3.7-flash-medium`; high → `gemini-3.7-flash-high` |
+| `gemini-3.6-flash` | Text, image | Low, Medium, High | 65,536 | low → `gemini-3.6-flash-low`; medium → `gemini-3.6-flash-medium`; high → `gemini-3.6-flash-high` |
+| `gemini-3.5-flash` | Text, image | Low, Medium, High | 65,536 | low → `gemini-3.5-flash-extra-low`; medium → `gemini-3.5-flash-low`; high → `gemini-3-flash-agent` |
+| `gemini-3.1-pro` | Text, image | Low, High | 65,535 | low → `gemini-3.1-pro-low`; high → `gemini-pro-agent` |
+| `claude-sonnet-4-6` | Text, image | High | 64,000 | high → `claude-sonnet-4-6` |
+| `claude-opus-4-6` | Text, image | High | 64,000 | high → `claude-opus-4-6-thinking` |
+| `gpt-oss-120b` | Text | Medium | 32,768 | medium → `gpt-oss-120b-medium` |
 
 To limit which models Pi cycles through, enable specific entries in `~/.pi/agent/settings.json`:
 
@@ -136,17 +140,19 @@ To limit which models Pi cycles through, enable specific entries in `~/.pi/agent
 
 All primary environment variables start with `ANTIGRAVITY_`. The legacy `NOAGY_` prefix is also accepted for compatibility.
 
-| Variable                    | Purpose                                                                                                          |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `ANTIGRAVITY_BASE_URL`      | Override the API base URL. It must be HTTPS, contain no URL credentials, and target an allowed Google APIs host. |
-| `ANTIGRAVITY_PROJECT_ID`    | Use a specific Cloud Code Assist project ID instead of discovery or the stable account fallback.                 |
-| `ANTIGRAVITY_CALLBACK_HOST` | Bind OAuth callback to `127.0.0.1`, `::1`, or `localhost` only. Defaults to `127.0.0.1`.                         |
-| `ANTIGRAVITY_USER_AGENT`    | Override the request user-agent.                                                                                 |
-| `ANTIGRAVITY_RUNTIME_MODEL` | Pin requests to a runtime model ID, bypassing discovered/fallback routing.                                       |
-| `ANTIGRAVITY_CLIENT_ID`     | Use a custom Google OAuth client ID.                                                                             |
-| `ANTIGRAVITY_CLIENT_SECRET` | Use a custom Google OAuth client secret. Keep it out of source control and shell history.                        |
-| `ANTIGRAVITY_NO_KEEPALIVE`  | Set to `1` to skip the keep-alive connection pool.                                                               |
-| `ANTIGRAVITY_NO_PREWARM`    | Set to `1` to skip the TLS pre-warm request made when the extension loads.                                       |
+<!-- prettier-ignore -->
+| Variable | Purpose |
+| --- | --- |
+| `ANTIGRAVITY_BASE_URL` | Override the API base URL. It must be HTTPS, contain no URL credentials, and target an allowed Google APIs host. |
+| `ANTIGRAVITY_PROJECT_ID` | Use a specific Cloud Code Assist project ID instead of discovery or the stable account fallback. |
+| `ANTIGRAVITY_CALLBACK_HOST` | Bind OAuth callback to `127.0.0.1`, `::1`, or `localhost` only. Defaults to `127.0.0.1`. |
+| `ANTIGRAVITY_USER_AGENT` | Override the request user-agent. |
+| `ANTIGRAVITY_RUNTIME_MODEL` | Pin requests to a runtime model ID, bypassing discovered/fallback routing. |
+| `ANTIGRAVITY_CATALOG_REFRESH_INTERVAL_MS` | Override catalog refresh TTL in ms. Defaults to 4 hours (`14400000`). Set to `0` to always refresh. |
+| `ANTIGRAVITY_CLIENT_ID` | Use a custom Google OAuth client ID. |
+| `ANTIGRAVITY_CLIENT_SECRET` | Use a custom Google OAuth client secret. Keep it out of source control and shell history. |
+| `ANTIGRAVITY_NO_KEEPALIVE` | Set to `1` to skip the keep-alive connection pool. |
+| `ANTIGRAVITY_NO_PREWARM` | Set to `1` to skip the TLS pre-warm request made when the extension loads. |
 
 By default, the provider tries `https://daily-cloudcode-pa.googleapis.com`, then the sandbox host, then `https://cloudcode-pa.googleapis.com`. Prefer the built-in OAuth client unless you have a reason to use your own credentials.
 

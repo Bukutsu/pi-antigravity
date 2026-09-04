@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mergeAvailableModelsResults } from "../src/client/index.js";
@@ -17,6 +17,9 @@ import {
   resolvedCatalog,
   setCatalogCachePathForTests,
   writeCatalogCache,
+  refreshAntigravityModels,
+  DEFAULT_CATALOG_REFRESH_INTERVAL_MS,
+  getCatalogRefreshIntervalMs,
   type AntigravityCatalog,
 } from "../src/models/index.js";
 
@@ -237,6 +240,216 @@ assert.ok(
   "ANTIGRAVITY_RUNTIME_MODEL remains an env override (applied in stream, not grouping)",
 );
 
+// TTL caching tests for refreshAntigravityModels
+assert.equal(
+  DEFAULT_CATALOG_REFRESH_INTERVAL_MS,
+  4 * 60 * 60 * 1000,
+  "default refresh interval is 4 hours",
+);
+assert.equal(getCatalogRefreshIntervalMs(), 4 * 60 * 60 * 1000, "reads default refresh interval");
+
+process.env.ANTIGRAVITY_CATALOG_REFRESH_INTERVAL_MS = "1800000";
+assert.equal(getCatalogRefreshIntervalMs(), 1800000, "reads ANTIGRAVITY_ override");
+delete process.env.ANTIGRAVITY_CATALOG_REFRESH_INTERVAL_MS;
+
+// Test TTL skip: when stored checkedAt is fresh (< 4 hours) and force is false, returns models without network
+const abortCtrl = new AbortController();
+const validKey = JSON.stringify({ token: "fake-token", projectId: "fake-project" });
+let publishCalled = false;
+const mockContextFresh = {
+  credential: { type: "api_key" as const, key: validKey },
+  stored: {
+    models: catalog.models.map((m) => ({ ...m, provider: "antigravity", api: "antigravity-api" as const, baseUrl: "https://example.com" })),
+    checkedAt: Date.now() - 60_000, // 1 minute ago
+  },
+  allowNetwork: true,
+  force: false,
+  signal: abortCtrl.signal,
+  publish: async () => {
+    publishCalled = true;
+    return true;
+  },
+};
+
+const freshResult = await refreshAntigravityModels(mockContextFresh);
+assert.ok(freshResult.length > 0, "returns catalog models when fresh");
+assert.equal(publishCalled, false, "does not make network call or publish when cache is fresh");
+
+// Test TTL skip when context.stored has no checkedAt, but file cache has fresh checkedAt
+const dir2 = mkdtempSync(join(tmpdir(), "antigravity-catalog-ttl-"));
+const cachePath2 = join(dir2, "antigravity-model-catalog.json");
+try {
+  setCatalogCachePathForTests(cachePath2);
+  writeCatalogCache(catalog, cachePath2);
+  let publishCalled2 = false;
+  const mockContextFileFresh = {
+    credential: { type: "api_key" as const, key: validKey },
+    stored: undefined,
+    allowNetwork: true,
+    force: false,
+    signal: abortCtrl.signal,
+    publish: async () => {
+      publishCalled2 = true;
+      return true;
+    },
+  };
+  const fileFreshResult = await refreshAntigravityModels(mockContextFileFresh);
+  assert.ok(fileFreshResult.length > 0, "returns catalog models when file cache is fresh");
+  assert.equal(publishCalled2, false, "skips network call when file cache checkedAt is fresh");
+} finally {
+  setCatalogCachePathForTests(undefined);
+  rmSync(dir2, { recursive: true, force: true });
+}
+
+// Test successful network discovery: renews checkedAt and calls publish() even when models match catalog
+const dirNetwork = mkdtempSync(join(tmpdir(), "antigravity-catalog-net-"));
+const cachePathNetwork = join(dirNetwork, "antigravity-model-catalog.json");
+const originalFetch = globalThis.fetch;
+try {
+  setCatalogCachePathForTests(cachePathNetwork);
+  const expiredTime = Date.now() - 5 * 60 * 60 * 1000;
+  writeCatalogCache(catalog, cachePathNetwork);
+  const cacheContent = JSON.parse(readFileSync(cachePathNetwork, "utf8"));
+  cacheContent.checkedAt = expiredTime;
+  writeFileSync(cachePathNetwork, JSON.stringify(cacheContent, null, 2));
+
+  let publishedPersist: { models?: unknown; checkedAt?: number } | undefined;
+  globalThis.fetch = async () => {
+    return new Response(
+      JSON.stringify({
+        models: {
+          "gemini-3.7-flash": { displayName: "Gemini 3.7 Flash" },
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+
+  const netContext = {
+    credential: { type: "api_key" as const, key: validKey },
+    stored: { models: [], checkedAt: 0 },
+    allowNetwork: true,
+    force: false,
+    signal: abortCtrl.signal,
+    publish: async (data: any) => {
+      publishedPersist = data?.persist;
+      return true;
+    },
+  };
+
+  const startTime = Date.now();
+  const netResult = await refreshAntigravityModels(netContext);
+  assert.ok(netResult.length > 0, "returns models on network discovery");
+  assert.ok(publishedPersist !== undefined, "publish is called on successful network discovery");
+  assert.ok(
+    typeof publishedPersist?.checkedAt === "number" && publishedPersist.checkedAt >= startTime,
+    "persisted checkedAt is updated to recent timestamp",
+  );
+
+  const updatedCache = readCatalogCache(cachePathNetwork);
+  assert.ok(
+    typeof updatedCache?.checkedAt === "number" && updatedCache.checkedAt >= startTime,
+    "file cache checkedAt is updated on successful discovery",
+  );
+} finally {
+  globalThis.fetch = originalFetch;
+  setCatalogCachePathForTests(undefined);
+  rmSync(dirNetwork, { recursive: true, force: true });
+}
+
+// Test empty/unusable discovery: preserves last-known-good models and does NOT refresh TTL or publish
+const dirEmpty = mkdtempSync(join(tmpdir(), "antigravity-catalog-empty-"));
+const cachePathEmpty = join(dirEmpty, "antigravity-model-catalog.json");
+try {
+  setCatalogCachePathForTests(cachePathEmpty);
+  const expiredTime = Date.now() - 5 * 60 * 60 * 1000;
+  writeCatalogCache(catalog, cachePathEmpty);
+  const cacheContent = JSON.parse(readFileSync(cachePathEmpty, "utf8"));
+  cacheContent.checkedAt = expiredTime;
+  writeFileSync(cachePathEmpty, JSON.stringify(cacheContent, null, 2));
+
+  let publishedOnEmpty = false;
+  globalThis.fetch = async () => {
+    return new Response(
+      JSON.stringify({
+        models: {},
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+
+  const emptyContext = {
+    credential: { type: "api_key" as const, key: validKey },
+    stored: { models: [], checkedAt: 0 },
+    allowNetwork: true,
+    force: false,
+    signal: abortCtrl.signal,
+    publish: async () => {
+      publishedOnEmpty = true;
+      return true;
+    },
+  };
+
+  const emptyResult = await refreshAntigravityModels(emptyContext);
+  assert.ok(emptyResult.length > 0, "preserves last-known-good models on empty discovery");
+  assert.equal(publishedOnEmpty, false, "does not publish on empty discovery");
+
+  const unrefreshedCache = readCatalogCache(cachePathEmpty);
+  assert.equal(
+    unrefreshedCache?.checkedAt,
+    expiredTime,
+    "does not renew file cache checkedAt on empty discovery",
+  );
+} finally {
+  globalThis.fetch = originalFetch;
+  setCatalogCachePathForTests(undefined);
+  rmSync(dirEmpty, { recursive: true, force: true });
+}
+
+// Test failed discovery (network error): preserves last-known-good models without refreshing TTL
+const dirError = mkdtempSync(join(tmpdir(), "antigravity-catalog-err-"));
+const cachePathError = join(dirError, "antigravity-model-catalog.json");
+try {
+  setCatalogCachePathForTests(cachePathError);
+  const expiredTime = Date.now() - 5 * 60 * 60 * 1000;
+  writeCatalogCache(catalog, cachePathError);
+  const cacheContent = JSON.parse(readFileSync(cachePathError, "utf8"));
+  cacheContent.checkedAt = expiredTime;
+  writeFileSync(cachePathError, JSON.stringify(cacheContent, null, 2));
+
+  let publishedOnError = false;
+  globalThis.fetch = async () => {
+    throw new Error("Network unreachable");
+  };
+
+  const errorContext = {
+    credential: { type: "api_key" as const, key: validKey },
+    stored: { models: [], checkedAt: 0 },
+    allowNetwork: true,
+    force: false,
+    signal: abortCtrl.signal,
+    publish: async () => {
+      publishedOnError = true;
+      return true;
+    },
+  };
+
+  const errorResult = await refreshAntigravityModels(errorContext);
+  assert.ok(errorResult.length > 0, "preserves last-known-good models on network error");
+  assert.equal(publishedOnError, false, "does not publish on network error");
+
+  const unrefreshedCache = readCatalogCache(cachePathError);
+  assert.equal(
+    unrefreshedCache?.checkedAt,
+    expiredTime,
+    "does not renew file cache checkedAt on network error",
+  );
+} finally {
+  globalThis.fetch = originalFetch;
+  setCatalogCachePathForTests(undefined);
+  rmSync(dirError, { recursive: true, force: true });
+}
+
 console.log(
-  "model discovery: grouping, overrides, empty/failure fallback, cache replace-on-success, and thinking config passed",
+  "model discovery: grouping, overrides, empty/failure fallback, cache replace-on-success, thinking config, and refresh TTL passed",
 );
