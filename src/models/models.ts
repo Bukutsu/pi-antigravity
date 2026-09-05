@@ -1,5 +1,5 @@
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
-import type { AntigravityRouting } from "../types/types.js";
+import type { AntigravityRouting, ThinkingWire } from "../types/types.js";
 import { ThinkingEffort } from "../types/enums.js";
 import type { AntigravityCatalog } from "./grouping.js";
 
@@ -376,39 +376,114 @@ export function getFallbackRuntimeModel(runtimeModel: string, effort?: string): 
   return undefined;
 }
 
-export type GeminiThinkingLevel = "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
-
-export type ThinkingWire = {
-  includeThoughts: boolean;
-  thinkingLevel?: GeminiThinkingLevel;
-  thinkingBudget?: number;
-};
+export type { ThinkingWire };
 
 export const ANTIGRAVITY_MODEL_ENUM: Record<string, string> = {
+  // Gemini 3.8 Flash
+  "gemini-3.8-flash": "MODEL_PLACEHOLDER_M318",
+  "gemini-3.8-flash-high": "MODEL_PLACEHOLDER_M318",
+  "gemini-3.8-flash-medium": "MODEL_PLACEHOLDER_M319",
+  "gemini-3.8-flash-low": "MODEL_PLACEHOLDER_M320",
+  "gemini-3.8-flash-tiered": "MODEL_PLACEHOLDER_M322",
+  // Gemini 3.7 Flash
+  "gemini-3.7-flash": "MODEL_PLACEHOLDER_M298",
+  "gemini-3.7-flash-high": "MODEL_PLACEHOLDER_M298",
+  "gemini-3.7-flash-medium": "MODEL_PLACEHOLDER_M299",
+  "gemini-3.7-flash-low": "MODEL_PLACEHOLDER_M300",
+  "gemini-3.7-flash-tiered": "MODEL_PLACEHOLDER_M301",
+  // Gemini 3.6 Flash
+  "gemini-3.6-flash": "MODEL_PLACEHOLDER_M71",
+  "gemini-3.6-flash-high": "MODEL_PLACEHOLDER_M71",
+  "gemini-3.6-flash-medium": "MODEL_PLACEHOLDER_M72",
+  "gemini-3.6-flash-low": "MODEL_PLACEHOLDER_M73",
+  "gemini-3.6-flash-tiered": "MODEL_PLACEHOLDER_M196",
+  // Gemini 3.5 Flash
+  "gemini-3.5-flash": "MODEL_PLACEHOLDER_M20",
   "gemini-3.5-flash-extra-low": "MODEL_PLACEHOLDER_M187",
   "gemini-3.5-flash-low": "MODEL_PLACEHOLDER_M20",
-  "gemini-3-flash-agent": "MODEL_PLACEHOLDER_M132",
+  "gemini-3-flash-agent": "MODEL_PLACEHOLDER_M84",
+  // Gemini 3.1 Pro
+  "gemini-3.1-pro": "MODEL_PLACEHOLDER_M36",
   "gemini-3.1-pro-low": "MODEL_PLACEHOLDER_M36",
+  "gemini-3.1-pro-high": "MODEL_PLACEHOLDER_M37",
   "gemini-pro-agent": "MODEL_PLACEHOLDER_M16",
+  // Claude
+  "claude-sonnet-4-6": "MODEL_PLACEHOLDER_M35",
+  "claude-opus-4-6": "MODEL_PLACEHOLDER_M26",
+  "claude-opus-4-6-thinking": "MODEL_PLACEHOLDER_M26",
+  // GPT-OSS
+  "gpt-oss-120b": "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
+  "gpt-oss-120b-medium": "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
 };
 
-function googleLevel(effort: string | undefined): GeminiThinkingLevel {
-  if (effort === "high" || effort === "xhigh") return "HIGH";
-  if (effort === "medium") return "MEDIUM";
-  return "LOW";
+const modelEnumCache = new Map<string, string>();
+
+/** Register dynamically discovered model enum (e.g. from fetchAvailableModels). */
+export function registerModelEnum(wireModelId: string, modelEnum: string): void {
+  if (wireModelId && modelEnum) {
+    modelEnumCache.set(wireModelId, modelEnum);
+  }
+}
+
+/** Register batch of discovered model enums from fetchAvailableModels raw models dictionary. */
+export function registerDiscoveredModelEnums(
+  models: Record<string, { model?: unknown }> | undefined,
+): void {
+  if (!models) return;
+  for (const [wireId, info] of Object.entries(models)) {
+    if (typeof info?.model === "string" && info.model) {
+      modelEnumCache.set(wireId, info.model);
+    }
+  }
+}
+
+/** Get model_enum label for a given wire model id (dynamic cache first, then static fallback). */
+export function getModelEnum(wireModelId: string): string | undefined {
+  const direct = modelEnumCache.get(wireModelId) || ANTIGRAVITY_MODEL_ENUM[wireModelId];
+  if (direct) return direct;
+
+  // Runtime overrides may name a public/base model while discovery only returned
+  // an enum for its selected runtime variant (for example `-low`).
+  const routed = getAntigravityRequestModelId(wireModelId, undefined);
+  return modelEnumCache.get(routed) || ANTIGRAVITY_MODEL_ENUM[routed];
+}
+
+/** Return a serializable snapshot of model enums learned from discovery. */
+export function snapshotDynamicModelEnums(): Record<string, string> {
+  return Object.fromEntries(modelEnumCache);
+}
+
+/** Replace dynamically learned model enums with a previously persisted snapshot. */
+export function restoreDynamicModelEnums(modelEnums: Record<string, string>): void {
+  modelEnumCache.clear();
+  for (const [wireModelId, modelEnum] of Object.entries(modelEnums)) {
+    if (wireModelId && modelEnum) modelEnumCache.set(wireModelId, modelEnum);
+  }
+}
+
+export function clearModelEnumCache(): void {
+  modelEnumCache.clear();
 }
 
 export function getThinkingConfig(
   modelId: string,
   effort: string | undefined,
 ): ThinkingWire | undefined {
-  if (modelId === "gemini-3.5-flash") {
+  if (modelId.startsWith("claude-")) {
+    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
+    return { includeThoughts: true, thinkingBudget: 1024 };
+  }
+  if (modelId.startsWith("gpt-oss-")) {
+    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
+    return { includeThoughts: true, thinkingBudget: 8192 };
+  }
+  if (modelId.startsWith("gemini-3.5-flash") || modelId === "gemini-3-flash-agent") {
     if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
     const thinkingBudget =
       effort === "high" || effort === "xhigh" ? 10_000 : effort === "medium" ? 4_000 : 1_000;
     return { includeThoughts: true, thinkingBudget };
   }
-  if (modelId === "gemini-3.1-pro") {
+  if (modelId.startsWith("gemini-3.1-pro") || modelId === "gemini-pro-agent") {
     if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
     return {
       includeThoughts: true,
@@ -416,8 +491,10 @@ export function getThinkingConfig(
     };
   }
   if (modelId.startsWith("gemini-")) {
-    if (!effort || effort === "off") return { includeThoughts: false };
-    return { includeThoughts: true, thinkingLevel: googleLevel(effort) };
+    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
+    const thinkingBudget =
+      effort === "high" || effort === "xhigh" ? -1 : effort === "medium" ? 4_000 : 1_000;
+    return { includeThoughts: true, thinkingBudget };
   }
   return undefined;
 }

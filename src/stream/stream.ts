@@ -68,6 +68,7 @@ import {
   antigravityEnv,
   antigravityRequestEnvelope,
   isRecord,
+  resolveSessionTrajectory,
   sanitizeText,
 } from "../utils/util.js";
 import { antigravityFetch } from "../utils/http.js";
@@ -129,13 +130,37 @@ function parseImageData(raw: string, explicitMime?: string): { data: string; mim
   };
 }
 
+const SKILL_BLOCK_PATTERN = /<skill\b[^>]*>[\s\S]*?<\/skill\s*>/gi;
+
+function skillBlocks(content: unknown): string[] {
+  const texts =
+    typeof content === "string"
+      ? [content]
+      : Array.isArray(content)
+        ? content.flatMap((item) =>
+            isRecord(item) && item.type === "text" && typeof item.text === "string"
+              ? [item.text]
+              : [],
+          )
+        : [];
+  return texts.flatMap((text) => text.match(SKILL_BLOCK_PATTERN) || []);
+}
+
+function withoutSkillBlocks(text: string): string {
+  return text.replace(SKILL_BLOCK_PATTERN, "");
+}
+
 function asTextParts(content: unknown): Array<GeminiTextPart | GeminiInlineDataPart> {
-  if (typeof content === "string") return [{ text: sanitizeText(content) }];
+  const textPart = (text: string): GeminiTextPart[] => {
+    const userText = withoutSkillBlocks(text);
+    return userText.trim() ? [{ text: sanitizeText(userText) }] : [];
+  };
+  if (typeof content === "string") return textPart(content);
   if (!Array.isArray(content)) return [];
   return content.flatMap((item): Array<GeminiTextPart | GeminiInlineDataPart> => {
     if (!isRecord(item)) return [];
     const block = item as ContentBlock;
-    if (block.type === "text") return [{ text: sanitizeText(block.text) }];
+    if (block.type === "text") return textPart(block.text);
     if (block.type === "image") {
       const rawData = block.data || block.source?.data;
       if (!rawData) return [];
@@ -289,14 +314,22 @@ export function convertMessages(
     }
   }
 
-  // Google Antigravity / Gemini requires the first turn to be from 'user'.
-  // If the conversation starts with 'model' (e.g. initial assistant greeting),
-  // prepend a minimal user message to prevent backend 400 rejection.
-  if (contents.length > 0 && contents[0]?.role === GeminiRole.Model) {
-    contents.unshift({
-      role: GeminiRole.User,
-      parts: [{ text: "Hello" }],
-    });
+  // Google Antigravity requires a natural-language user part in the request,
+  // including tool-only continuation turns. Keep injected Skills in the system
+  // instruction, then add this protocol bridge only when existing context gives
+  // the model something concrete to act on.
+  const hasUserText = contents.some(
+    (turn) =>
+      turn.role === GeminiRole.User &&
+      turn.parts.some((part) => "text" in part && Boolean(part.text.trim())),
+  );
+  if (!hasUserText && contents.length > 0) {
+    const bridge = {
+      text: "Continue the active task using the available instructions and context.",
+    };
+    const userTurn = contents.find((turn) => turn.role === GeminiRole.User);
+    if (userTurn) userTurn.parts.push(bridge);
+    else contents.unshift({ role: GeminiRole.User, parts: [bridge] });
   }
 
   return contents;
@@ -720,19 +753,38 @@ export function buildRequest(
   options: AntigravityStreamOptions,
   runtimeModel: string,
 ): AntigravityGenerateRequest {
+  const injectedSkills = context.messages.flatMap((msg) =>
+    msg.role === "user" ? skillBlocks(msg.content) : [],
+  );
+  const systemParts = context.systemPrompt
+    ? [{ text: sanitizeText(context.systemPrompt) }]
+    : [{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION }, { text: ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION }];
+  systemParts.push(...injectedSkills.map((skill) => ({ text: sanitizeText(skill) })));
+
+  const contents = convertMessages(model, context, runtimeModel);
+  const hasUserText = contents.some(
+    (turn) =>
+      turn.role === GeminiRole.User &&
+      turn.parts.some((part) => "text" in part && Boolean(part.text.trim())),
+  );
+  if (!hasUserText && (injectedSkills.length > 0 || Boolean(context.systemPrompt))) {
+    contents.unshift({
+      role: GeminiRole.User,
+      parts: [{ text: "Apply the active system instructions." }],
+    });
+  }
+
   const request: GeminiRequestBody = {
-    contents: convertMessages(model, context, runtimeModel),
+    contents,
     systemInstruction: {
       role: GeminiRole.User,
-      parts: context.systemPrompt
-        ? [{ text: sanitizeText(context.systemPrompt) }]
-        : [{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION }, { text: ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION }],
+      parts: systemParts,
     },
   };
 
   const generationConfig: GeminiGenerationConfig = {};
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature;
-  const thinking = getThinkingConfig(model.id, options.reasoning ?? "off");
+  const thinking = getThinkingConfig(runtimeModel, options.reasoning ?? "off");
   if (thinking) generationConfig.thinkingConfig = thinking;
   const maxAllowed = getMaxOutputTokens(model.id, runtimeModel);
   if (options.maxTokens !== undefined) {
@@ -746,21 +798,44 @@ export function buildRequest(
   const tools = convertTools(context.tools, isClaude || model.id.startsWith("gpt-oss-"));
   if (tools) {
     request.tools = tools;
+  }
+  if (options.toolChoice && options.toolChoice !== ToolChoice.Auto) {
     request.toolConfig = {
       functionCallingConfig: {
-        mode:
-          options.toolChoice && options.toolChoice !== ToolChoice.Auto
-            ? mapToolChoiceMode(options.toolChoice)
-            : GeminiToolCallingMode.Validated,
+        mode: mapToolChoiceMode(options.toolChoice),
       },
-    };
-  } else if (isClaude) {
-    request.toolConfig = {
-      functionCallingConfig: { mode: GeminiToolCallingMode.Validated },
     };
   }
 
-  const envelope = antigravityRequestEnvelope(runtimeModel, isClaude);
+  const isNonGemini =
+    isClaude ||
+    model.id.startsWith("gpt-oss-") ||
+    runtimeModel.startsWith("gpt-oss-") ||
+    (!model.id.startsWith("gemini-") && !runtimeModel.startsWith("gemini-"));
+
+  // Pure agy CLI wire alignment:
+  // - step in requestId (.../<step>) equals contents.length (total content blocks)
+  // - last_step_index is 0-based index of the last content block (contents.length - 1)
+  // - request_id is ${trajectoryId}-${requestIndex} (0-based HTTP request sequence counter)
+  //   In multi-turn agent loops (with tools), every completed assistant response increments the request counter.
+  const step = Math.max(1, request.contents.length);
+  const lastStepIndex = String(Math.max(0, request.contents.length - 1));
+  const requestIndex =
+    context.messages?.filter(
+      (m) => m.role === "assistant" && m.stopReason !== "error" && m.stopReason !== "aborted",
+    ).length ?? 0;
+
+  const { conversationId, trajectoryId } = resolveSessionTrajectory(context);
+
+  const envelope = antigravityRequestEnvelope(runtimeModel, {
+    isClaude,
+    isNonGemini,
+    step,
+    lastStepIndex,
+    requestIndex,
+    conversationId,
+    trajectoryId,
+  });
   request.sessionId = options.sessionId || envelope.sessionId;
   request.labels = envelope.labels;
 
@@ -863,7 +938,158 @@ function asToolCallArguments(args: Record<string, unknown> | undefined): ToolCal
   return (args ?? {}) as ToolCall["arguments"];
 }
 
+/** Default response-header deadline for streaming requests (see fetchWithHeaderDeadline). */
+const STREAM_HEADER_TIMEOUT_DEFAULT_MS = 180_000;
+/** Default mid-body stall deadline: abort when no SSE bytes arrive for this long. */
+const STREAM_STALL_TIMEOUT_DEFAULT_MS = 120_000;
+
+function envTimeoutMs(name: string, fallback: number): number {
+  const raw = antigravityEnv(name);
+  if (!raw || !/^\d+$/.test(raw)) return fallback;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : fallback;
+}
+
+/**
+ * Streaming header deadline in milliseconds, from ANTIGRAVITY_STREAM_HEADER_TIMEOUT_MS
+ * (or the legacy NOAGY_ prefix). 0 disables the deadline; invalid values fall back
+ * to the default.
+ */
+export function streamHeaderTimeoutMs(): number {
+  return envTimeoutMs("STREAM_HEADER_TIMEOUT_MS", STREAM_HEADER_TIMEOUT_DEFAULT_MS);
+}
+
+/**
+ * Mid-body stall deadline in milliseconds, from ANTIGRAVITY_STREAM_STALL_TIMEOUT_MS
+ * (legacy NOAGY_ prefix honored). 0 disables. A healthy SSE stream emits bytes
+ * continuously while generating, so a silent gap this long means the connection
+ * is dead even though headers arrived — abort with a named error rather than
+ * hanging until an external process timeout.
+ */
+export function streamStallTimeoutMs(): number {
+  return envTimeoutMs("STREAM_STALL_TIMEOUT_MS", STREAM_STALL_TIMEOUT_DEFAULT_MS);
+}
+
+function stallError(stallMs: number): Error {
+  return new Error(`stream stalled: no data for ${stallMs}ms`);
+}
+
+/**
+ * Guard a response body against mid-stream stalls while retaining caller
+ * cancellation until the body finishes or is cancelled. The wrapper reads only
+ * when its consumer pulls, preserving backpressure; its timer is unref'd so an
+ * armed deadline cannot keep the process alive.
+ */
+function guardResponseBody(
+  response: Response,
+  controller: AbortController,
+  stallMs: number,
+  cleanup: () => void,
+): Response {
+  if (!response.body) {
+    cleanup();
+    return response;
+  }
+  const reader = response.body.getReader();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    if (timer) clearTimeout(timer);
+    cleanup();
+  };
+  const reset = () => {
+    if (stallMs <= 0) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(stallError(stallMs)), stallMs);
+    timer.unref?.();
+  };
+  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const abortBody = () => {
+    streamController?.error(controller.signal.reason);
+    void reader.cancel(controller.signal.reason).catch(() => undefined);
+    finish();
+  };
+  controller.signal.addEventListener("abort", abortBody, { once: true });
+  reset();
+  const guarded = new ReadableStream<Uint8Array>({
+    start(controller) {
+      streamController = controller;
+    },
+    async pull(streamController) {
+      try {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          finish();
+          streamController.close();
+          return;
+        }
+        if (!(chunk.value instanceof Uint8Array)) {
+          throw new Error("Response body yielded an invalid chunk");
+        }
+        reset();
+        streamController.enqueue(chunk.value);
+      } catch (error) {
+        finish();
+        streamController.error(error);
+      }
+    },
+    async cancel(reason) {
+      finish();
+      await reader.cancel(reason);
+    },
+  });
+  return new Response(guarded, response);
+}
+
+/**
+ * Fetch with a response-header deadline and a mid-body stall watchdog. A server
+ * can accept a request on a warm keep-alive socket and then never send response
+ * headers (header phase), or send headers and then go silent mid-body (stall
+ * phase); either way the request is aborted with a named error instead of
+ * hanging until an external process timeout. Long healthy responses are never
+ * cut: the header timer disarms once headers arrive, and the stall timer resets
+ * on every chunk, so only genuine silence aborts.
+ *
+ * Exported with an injectable fetch for unit tests.
+ */
+export async function fetchWithHeaderDeadline(
+  url: string,
+  init: RequestInit,
+  callerSignal: AbortSignal | undefined,
+  timeoutMs: number,
+  stallMs: number = 0,
+  fetchFn: (input: string, init: RequestInit) => Promise<Response> = antigravityFetch,
+): Promise<Response> {
+  if (timeoutMs <= 0 && stallMs <= 0) {
+    return fetchFn(url, { ...init, signal: callerSignal ?? init.signal });
+  }
+  const controller = new AbortController();
+  const forward = () => controller.abort(callerSignal?.reason);
+  const cleanup = () => callerSignal?.removeEventListener("abort", forward);
+  callerSignal?.addEventListener("abort", forward, { once: true });
+  if (callerSignal?.aborted) forward();
+  const timer =
+    timeoutMs > 0
+      ? setTimeout(
+          () => controller.abort(new Error(`no response headers within ${timeoutMs}ms`)),
+          timeoutMs,
+        )
+      : undefined;
+  let responseBodyGuarded = false;
+  try {
+    const response = await fetchFn(url, { ...init, signal: controller.signal });
+    responseBodyGuarded = Boolean(response.body);
+    return guardResponseBody(response, controller, stallMs, cleanup);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (!responseBodyGuarded) cleanup();
+  }
+}
+
 /** Exported for unit tests. */
+
 export async function streamResponse(
   response: Response,
   stream: AssistantMessageEventStream,
@@ -1083,11 +1309,7 @@ export function streamAntigravity(
         runtimeCandidates.push(fallback);
       }
 
-      const isClaudeReasoning = model.id.startsWith("claude-") && model.reasoning;
-      const requestHeaders: Record<string, string> = {
-        ...antigravityHeaders(creds.token),
-        ...(isClaudeReasoning ? { "anthropic-beta": "interleaved-thinking-2025-05-14" } : {}),
-      };
+      const requestHeaders = antigravityHeaders(creds.token);
 
       let response: Response | undefined;
       let lastText = "";
@@ -1108,14 +1330,16 @@ export function streamAntigravity(
 
           for (const endpoint of endpointCandidates()) {
             setLastEndpoint(endpoint);
-            response = await antigravityFetch(
+            response = await fetchWithHeaderDeadline(
               `${endpoint}/v1internal:streamGenerateContent?alt=sse`,
               {
                 method: "POST",
                 headers: requestHeaders,
                 body,
-                signal: opts.signal,
               },
+              opts.signal,
+              streamHeaderTimeoutMs(),
+              streamStallTimeoutMs(),
             );
             setLastStatus(response.status);
             if (response.ok) break;

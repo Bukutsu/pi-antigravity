@@ -6,7 +6,7 @@ import {
   stableProjectId,
 } from "../src/client/index.js";
 import { getLastDiagnostics, resetDiagnosticsForTests } from "../src/diagnostics/index.js";
-import { StopReason } from "../src/types/enums.js";
+import { GeminiToolCallingMode, StopReason, ToolChoice } from "../src/types/enums.js";
 import {
   ANTIGRAVITY_MODELS,
   getMaxOutputTokens,
@@ -20,6 +20,10 @@ import {
   friendlyAntigravityError,
   mapStopReason,
 } from "../src/stream/index.js";
+import {
+  antigravityRequestEnvelope,
+  clearSessionTrajectoryMap,
+} from "../src/utils/util.js";
 
 function fail(message: string): never {
   throw new Error(message);
@@ -774,21 +778,22 @@ const reqD = buildRequest(
 );
 assert.equal(reqD.request.generationConfig?.maxOutputTokens, 65535);
 
-// Case E: Gemini 3.8/3.7/3.6 send thinkingLevel; 3.5 sends thinkingBudget.
+// Case E: Gemini models send thinkingBudget (high: -1, medium: 4000, low: 1000, off: 0)
 const flash38Model = { ...model, id: "gemini-3.8-flash", maxTokens: 65536 };
-for (const [reasoning, thinkingLevel, runtime] of [
-  ["low", "LOW", "gemini-3.8-flash-low"],
-  ["medium", "MEDIUM", "gemini-3.8-flash-medium"],
-  ["high", "HIGH", "gemini-3.8-flash-high"],
+for (const [reasoning, thinkingBudget, runtime] of [
+  ["low", 1000, "gemini-3.8-flash-low"],
+  ["medium", 4000, "gemini-3.8-flash-medium"],
+  ["high", -1, "gemini-3.8-flash-high"],
 ] as const) {
   const request = buildRequest(flash38Model, dummyContext, "test-proj", { reasoning }, runtime);
-  assert.equal(request.request.generationConfig?.thinkingConfig?.thinkingLevel, thinkingLevel);
+  assert.equal(request.request.generationConfig?.thinkingConfig?.thinkingBudget, thinkingBudget);
   assert.equal(request.request.generationConfig?.thinkingConfig?.includeThoughts, true);
 }
 
 const flash37Model = { ...model, id: "gemini-3.7-flash", maxTokens: 65536 };
 const flash37 = buildRequest(flash37Model, dummyContext, "test-proj", { reasoning: "high" }, "gemini-3.7-flash-high");
-assert.equal(flash37.request.generationConfig?.thinkingConfig?.thinkingLevel, "HIGH");
+assert.equal(flash37.request.generationConfig?.thinkingConfig?.thinkingBudget, -1);
+assert.equal(flash37.request.generationConfig?.thinkingConfig?.includeThoughts, true);
 
 const flash36 = buildRequest(
   { ...model, id: "gemini-3.6-flash", maxTokens: 65536 },
@@ -797,7 +802,8 @@ const flash36 = buildRequest(
   { reasoning: "medium" },
   "gemini-3.6-flash-medium",
 );
-assert.equal(flash36.request.generationConfig?.thinkingConfig?.thinkingLevel, "MEDIUM");
+assert.equal(flash36.request.generationConfig?.thinkingConfig?.thinkingBudget, 4000);
+assert.equal(flash36.request.generationConfig?.thinkingConfig?.includeThoughts, true);
 
 const flash37Off = buildRequest(
   flash37Model,
@@ -807,7 +813,7 @@ const flash37Off = buildRequest(
   "gemini-3.7-flash-low",
 );
 assert.equal(flash37Off.request.generationConfig?.thinkingConfig?.includeThoughts, false);
-assert.equal(flash37Off.request.generationConfig?.thinkingConfig?.thinkingLevel, undefined);
+assert.equal(flash37Off.request.generationConfig?.thinkingConfig?.thinkingBudget, 0);
 
 const flash35 = buildRequest(
   { ...model, id: "gemini-3.5-flash", maxTokens: 65536 },
@@ -819,6 +825,40 @@ const flash35 = buildRequest(
 assert.equal(flash35.request.generationConfig?.thinkingConfig?.thinkingBudget, 4000);
 assert.match(flash35.requestId, /^agent\//);
 assert.ok(flash35.request.labels?.trajectory_id);
+
+const claudeReq = buildRequest(
+  model,
+  dummyContext,
+  "test-proj",
+  { reasoning: "high" },
+  "claude-sonnet-4-6",
+);
+assert.equal(claudeReq.request.generationConfig?.thinkingConfig?.thinkingBudget, 1024);
+assert.equal(claudeReq.request.generationConfig?.thinkingConfig?.includeThoughts, true);
+
+const crossProviderOverride = buildRequest(
+  flash37Model,
+  dummyContext,
+  "test-proj",
+  { reasoning: "high" },
+  "claude-sonnet-4-6",
+);
+assert.equal(
+  crossProviderOverride.request.generationConfig?.thinkingConfig?.thinkingBudget,
+  1024,
+  "thinking configuration follows the effective runtime override",
+);
+
+const gptOssOverrideModel = { ...model, id: "gpt-oss-120b", maxTokens: 32768 };
+const gptOssReq = buildRequest(
+  gptOssOverrideModel,
+  dummyContext,
+  "test-proj",
+  { reasoning: "medium" },
+  "gpt-oss-120b-medium",
+);
+assert.equal(gptOssReq.request.generationConfig?.thinkingConfig?.thinkingBudget, 8192);
+assert.equal(gptOssReq.request.generationConfig?.thinkingConfig?.includeThoughts, true);
 
 const zeroUsage = {
   input: 0,
@@ -1012,6 +1052,103 @@ const withPiPrompt = buildRequest(
 assert.equal(withPiPrompt.request.systemInstruction.parts.length, 1);
 assert.equal(withPiPrompt.request.systemInstruction.parts[0]?.text, "You are Pi. Follow AGENTS.md.");
 
+// Skill-only turns are injected instructions, not user prompts. The request remains
+// valid without inventing a user message, and the Skill is preserved as system context.
+const skillOnlyContext = {
+  messages: [
+    {
+      role: "user",
+      content: '<skill name="smart-commit-grouping">Group commits by intent.</skill>',
+      timestamp: Date.now(),
+    },
+  ],
+} as Context;
+const skillOnlyRequest = buildRequest(
+  flash37Model,
+  skillOnlyContext,
+  "test-proj",
+  {},
+  "gemini-3.7-flash-low",
+);
+assert.equal(skillOnlyRequest.request.contents.length, 1);
+assert.equal(skillOnlyRequest.request.contents[0]?.role, "user");
+assert.equal(
+  skillOnlyRequest.request.contents[0]?.parts[0]?.text,
+  "Apply the active system instructions.",
+);
+assert.equal(skillOnlyRequest.request.systemInstruction.parts.length, 3);
+assert.equal(
+  skillOnlyRequest.request.systemInstruction.parts[2]?.text,
+  '<skill name="smart-commit-grouping">Group commits by intent.</skill>',
+);
+
+const systemOnlyRequest = buildRequest(
+  flash37Model,
+  { messages: [], systemPrompt: "Follow the repository conventions." } as Context,
+  "test-proj",
+  {},
+  "gemini-3.7-flash-low",
+);
+assert.equal(systemOnlyRequest.request.contents[0]?.parts[0]?.text, "Apply the active system instructions.");
+assert.equal(
+  systemOnlyRequest.request.systemInstruction.parts[0]?.text,
+  "Follow the repository conventions.",
+);
+
+const skillAndUserContext = {
+  messages: [
+    {
+      role: "user",
+      content:
+        '<skill name="smart-commit-grouping">Group commits by intent.</skill> Commit the staged changes.',
+      timestamp: Date.now(),
+    },
+  ],
+} as Context;
+const skillAndUserRequest = buildRequest(
+  flash37Model,
+  skillAndUserContext,
+  "test-proj",
+  {},
+  "gemini-3.7-flash-low",
+);
+assert.equal(skillAndUserRequest.request.contents[0]?.parts[0]?.text, " Commit the staged changes.");
+assert.equal(
+  skillAndUserRequest.request.systemInstruction.parts[2]?.text,
+  '<skill name="smart-commit-grouping">Group commits by intent.</skill>',
+);
+
+// Tool-result-only turns also need no synthetic user text.
+const toolResultOnlyContext = {
+  messages: [
+    {
+      role: "toolResult",
+      toolCallId: "call-1",
+      toolName: "read",
+      content: [{ type: "text", text: "file contents" }],
+      isError: false,
+      timestamp: Date.now(),
+    },
+  ],
+} as unknown as Context;
+const toolResultOnlyRequest = buildRequest(
+  flash37Model,
+  toolResultOnlyContext,
+  "test-proj",
+  {},
+  "gemini-3.7-flash-low",
+);
+assert.equal(toolResultOnlyRequest.request.contents.length, 1);
+assert.equal(toolResultOnlyRequest.request.contents[0]?.role, "user");
+assert.ok(
+  toolResultOnlyRequest.request.contents[0]?.parts.some((part) => "functionResponse" in part),
+);
+assert.ok(
+  toolResultOnlyRequest.request.contents[0]?.parts.some(
+    (part) => "text" in part && part.text === "Continue the active task using the available instructions and context.",
+  ),
+);
+
 const fallbackPersona = buildRequest(flash37Model, dummyContext, "test-proj", {}, "gemini-3.7-flash-low");
 assert.equal(fallbackPersona.request.systemInstruction.parts.length, 2);
 assert.match(fallbackPersona.request.systemInstruction.parts[0]?.text || "", /You are Antigravity/);
@@ -1054,6 +1191,338 @@ try {
   if (savedNoagyUserAgent !== undefined) process.env.NOAGY_USER_AGENT = savedNoagyUserAgent;
   else delete process.env.NOAGY_USER_AGENT;
 }
+// Wire fingerprint: Envelope & labels normalization (PR 4)
+// 1. antigravityRequestEnvelope backwards compatibility and options support
+const envDefault = antigravityRequestEnvelope("gemini-3.7-flash-high", false);
+assert.equal(envDefault.labels.last_step_index, "0");
+assert.equal(envDefault.labels.request_id, `${envDefault.labels.trajectory_id}-0`);
+assert.equal(envDefault.labels.used_claude, "false");
+assert.equal(envDefault.labels.used_claude_conservative, "false");
+assert.equal(envDefault.labels.used_non_gemini_model, "false");
+assert.equal(envDefault.labels.model_enum, "MODEL_PLACEHOLDER_M298");
+assert.match(envDefault.requestId, /^agent\/[0-9a-f-]+\/\d+\/[0-9a-f-]+\/1$/);
+
+const envClaude = antigravityRequestEnvelope("claude-sonnet-4-6", true);
+assert.equal(envClaude.labels.last_step_index, "0");
+assert.equal(envClaude.labels.used_claude, "true");
+assert.equal(envClaude.labels.used_claude_conservative, "true");
+assert.equal(envClaude.labels.used_non_gemini_model, "true");
+assert.equal(envClaude.labels.model_enum, "MODEL_PLACEHOLDER_M35");
+
+const envMultiTurn = antigravityRequestEnvelope("gpt-oss-120b-medium", {
+  isNonGemini: true,
+  step: 3,
+});
+assert.equal(envMultiTurn.labels.last_step_index, "2");
+assert.equal(envMultiTurn.labels.request_id, `${envMultiTurn.labels.trajectory_id}-2`);
+assert.equal(envMultiTurn.labels.used_claude, "false");
+assert.equal(envMultiTurn.labels.used_non_gemini_model, "true");
+assert.equal(envMultiTurn.labels.model_enum, "MODEL_OPENAI_GPT_OSS_120B_MEDIUM");
+assert.match(envMultiTurn.requestId, /^agent\/[0-9a-f-]+\/\d+\/[0-9a-f-]+\/3$/);
+
+// 2. buildRequest wire labels across models
+const claudeSonnetModel = ANTIGRAVITY_MODELS.find((m) => m.id === "claude-sonnet-4-6")!;
+const claudeOpusModel = ANTIGRAVITY_MODELS.find((m) => m.id === "claude-opus-4-6")!;
+const gptOssModel = ANTIGRAVITY_MODELS.find((m) => m.id === "gpt-oss-120b")!;
+const pro31Model = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.1-pro")!;
+
+const reqFlash38 = buildRequest(
+  ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.8-flash")!,
+  dummyContext,
+  "test-proj",
+  {},
+  "gemini-3.8-flash-high",
+);
+assert.equal(reqFlash38.request.labels?.last_step_index, "0");
+assert.equal(reqFlash38.request.labels?.request_id, `${reqFlash38.request.labels?.trajectory_id}-0`);
+assert.equal(reqFlash38.request.labels?.used_claude, "false");
+assert.equal(reqFlash38.request.labels?.used_claude_conservative, "false");
+assert.equal(reqFlash38.request.labels?.used_non_gemini_model, "false");
+assert.equal(reqFlash38.request.labels?.model_enum, "MODEL_PLACEHOLDER_M318");
+assert.match(reqFlash38.requestId, /\/1$/);
+
+const reqFlash36 = buildRequest(
+  ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.6-flash")!,
+  dummyContext,
+  "test-proj",
+  {},
+  "gemini-3.6-flash-high",
+);
+assert.equal(reqFlash36.request.labels?.model_enum, "MODEL_PLACEHOLDER_M71");
+assert.equal(reqFlash36.request.labels?.used_non_gemini_model, "false");
+
+const reqPro = buildRequest(pro31Model, dummyContext, "test-proj", {}, "gemini-pro-agent");
+assert.equal(reqPro.request.labels?.model_enum, "MODEL_PLACEHOLDER_M16");
+assert.equal(reqPro.request.labels?.used_claude, "false");
+assert.equal(reqPro.request.labels?.used_non_gemini_model, "false");
+
+const reqSonnet = buildRequest(claudeSonnetModel, dummyContext, "test-proj", {}, "claude-sonnet-4-6");
+assert.equal(reqSonnet.request.labels?.used_claude, "true");
+assert.equal(reqSonnet.request.labels?.used_claude_conservative, "true");
+assert.equal(reqSonnet.request.labels?.used_non_gemini_model, "true");
+assert.equal(reqSonnet.request.labels?.model_enum, "MODEL_PLACEHOLDER_M35");
+
+const reqOpus = buildRequest(claudeOpusModel, dummyContext, "test-proj", {}, "claude-opus-4-6-thinking");
+assert.equal(reqOpus.request.labels?.used_claude, "true");
+assert.equal(reqOpus.request.labels?.used_non_gemini_model, "true");
+assert.equal(reqOpus.request.labels?.model_enum, "MODEL_PLACEHOLDER_M26");
+
+const reqGptOss = buildRequest(gptOssModel, dummyContext, "test-proj", {}, "gpt-oss-120b-medium");
+assert.equal(reqGptOss.request.labels?.used_claude, "false");
+assert.equal(reqGptOss.request.labels?.used_claude_conservative, "false");
+assert.equal(reqGptOss.request.labels?.used_non_gemini_model, "true");
+assert.equal(reqGptOss.request.labels?.model_enum, "MODEL_OPENAI_GPT_OSS_120B_MEDIUM");
+
+// 3. Multi-turn step calculation and tool call request_id sequence
+const baseTime = 1700000000000;
+const turn1Context: Context = {
+  messages: [{ role: "user", content: "read file", timestamp: baseTime }],
+};
+
+// Turn 1, call 1: initial user prompt (0 prior assistant turns -> request_id: <traj>-0)
+const reqTurn1 = buildRequest(flash37Model, turn1Context, "test-proj", {}, "gemini-3.7-flash-low");
+assert.equal(reqTurn1.request.labels?.last_step_index, "0");
+assert.equal(reqTurn1.request.labels?.request_id, `${reqTurn1.request.labels?.trajectory_id}-0`);
+assert.match(reqTurn1.requestId, /\/1$/);
+
+// Turn 1, call 2: tool execution result follows (1 assistant toolCall + 1 toolResult in context -> request_id: <traj>-1)
+const turn1ToolContext: Context = {
+  messages: [
+    { role: "user", content: "read file", timestamp: baseTime },
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "call_1",
+          name: "read_file",
+          arguments: { path: "a.txt" },
+          thoughtSignature: "dGVzdC1zaWduYXR1cmUtMTIzNDU2",
+        },
+      ],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "gemini-3.7-flash",
+      usage: zeroUsage,
+      stopReason: "stop",
+      timestamp: baseTime + 1000,
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call_1",
+      toolName: "read_file",
+      content: [{ type: "text", text: "file content" }],
+      isError: false,
+      timestamp: baseTime + 2000,
+    },
+  ],
+};
+const reqTurn1Tool = buildRequest(flash37Model, turn1ToolContext, "test-proj", {}, "gemini-3.7-flash-low");
+assert.equal(reqTurn1Tool.request.labels?.last_step_index, "2");
+assert.equal(reqTurn1Tool.request.labels?.request_id, `${reqTurn1Tool.request.labels?.trajectory_id}-1`);
+assert.match(reqTurn1Tool.requestId, /\/3$/);
+assert.equal(
+  reqTurn1Tool.request.labels?.trajectory_id,
+  reqTurn1.request.labels?.trajectory_id,
+  "tool execution loop preserves same trajectory_id",
+);
+
+// Turn 2, call 3: user follow-up prompt (2 prior assistant turns -> request_id: <traj>-2)
+const turn2Context: Context = {
+  messages: [
+    ...turn1ToolContext.messages,
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "done reading" }],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "gemini-3.7-flash",
+      usage: zeroUsage,
+      stopReason: "stop",
+      timestamp: baseTime + 3000,
+    },
+    { role: "user", content: "summarize it", timestamp: baseTime + 4000 },
+  ],
+};
+const reqTurn2 = buildRequest(flash37Model, turn2Context, "test-proj", {}, "gemini-3.7-flash-low");
+assert.equal(reqTurn2.request.labels?.last_step_index, "4");
+assert.equal(reqTurn2.request.labels?.request_id, `${reqTurn2.request.labels?.trajectory_id}-2`);
+assert.match(reqTurn2.requestId, /\/5$/);
+assert.equal(
+  reqTurn2.request.labels?.trajectory_id,
+  reqTurn1.request.labels?.trajectory_id,
+  "turn 2 preserves same trajectory_id",
+);
+
+const failedAssistantContext: Context = {
+  messages: [
+    ...turn2Context.messages,
+    {
+      role: "assistant",
+      content: [],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "gemini-3.7-flash",
+      usage: zeroUsage,
+      stopReason: "error",
+      timestamp: baseTime + 5000,
+    },
+    {
+      role: "assistant",
+      content: [],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "gemini-3.7-flash",
+      usage: zeroUsage,
+      stopReason: "aborted",
+      timestamp: baseTime + 6000,
+    },
+  ],
+};
+const reqAfterFailures = buildRequest(
+  flash37Model,
+  failedAssistantContext,
+  "test-proj",
+  {},
+  "gemini-3.7-flash-low",
+);
+assert.equal(
+  reqAfterFailures.request.labels?.request_id,
+  `${reqAfterFailures.request.labels?.trajectory_id}-2`,
+  "failed and aborted assistant messages do not increment requestIndex",
+);
+
+// 4. Session restart resilience: clearing in-memory cache restores identical deterministic trajectory_id
+clearSessionTrajectoryMap();
+const reqTurn2Restarted = buildRequest(flash37Model, turn2Context, "test-proj", {}, "gemini-3.7-flash-low");
+assert.equal(
+  reqTurn2Restarted.request.labels?.trajectory_id,
+  reqTurn1.request.labels?.trajectory_id,
+  "deterministic seed restores identical trajectory_id across process restarts",
+);
+
+// Wire fingerprint: toolConfig omission on default (auto) for all models (pure agy CLI)
+const dummyToolsContext: Context = {
+  ...dummyContext,
+  tools: [
+    {
+      name: "read_file",
+      description: "Read a file",
+      parameters: { type: "object", properties: { path: { type: "string" } } },
+    } as Tool,
+  ],
+};
+
+// 1. Gemini with tools: tools present, toolConfig undefined
+const geminiWithTools = buildRequest(
+  flash37Model,
+  dummyToolsContext,
+  "test-proj",
+  {},
+  "gemini-3.7-flash-high",
+);
+assert.ok(geminiWithTools.request.tools);
+assert.equal(geminiWithTools.request.toolConfig, undefined);
+
+// 2. Claude with tools: tools present, toolConfig undefined
+const claudeWithTools = buildRequest(
+  model,
+  dummyToolsContext,
+  "test-proj",
+  {},
+  "claude-sonnet-4-6",
+);
+assert.ok(claudeWithTools.request.tools);
+assert.equal(claudeWithTools.request.toolConfig, undefined);
+
+// 3. Claude without tools: toolConfig undefined (no legacy VALIDATED injection)
+const claudeNoTools = buildRequest(
+  model,
+  dummyContext,
+  "test-proj",
+  {},
+  "claude-sonnet-4-6",
+);
+assert.equal(claudeNoTools.request.tools, undefined);
+assert.equal(claudeNoTools.request.toolConfig, undefined);
+
+// 4. GPT-OSS with tools: tools present, toolConfig undefined
+const gptOssToolsModel = { ...model, id: "gpt-oss-120b", maxTokens: 32768 };
+const gptOssWithTools = buildRequest(
+  gptOssToolsModel,
+  dummyToolsContext,
+  "test-proj",
+  {},
+  "gpt-oss-120b-medium",
+);
+assert.ok(gptOssWithTools.request.tools);
+assert.equal(gptOssWithTools.request.toolConfig, undefined);
+
+// 5. Explicit toolChoice: "auto" -> toolConfig undefined
+const autoReq = buildRequest(
+  flash37Model,
+  dummyToolsContext,
+  "test-proj",
+  { toolChoice: ToolChoice.Auto },
+  "gemini-3.7-flash-high",
+);
+assert.equal(autoReq.request.toolConfig, undefined);
+
+// 6. Explicit toolChoice: "none" -> toolConfig mode NONE
+const noneReq = buildRequest(
+  flash37Model,
+  dummyToolsContext,
+  "test-proj",
+  { toolChoice: ToolChoice.None },
+  "gemini-3.7-flash-high",
+);
+assert.deepEqual(noneReq.request.toolConfig, {
+  functionCallingConfig: { mode: GeminiToolCallingMode.None },
+});
+
+// 7. Explicit toolChoice: "any" / "required" -> toolConfig mode ANY
+const anyReq = buildRequest(
+  flash37Model,
+  dummyToolsContext,
+  "test-proj",
+  { toolChoice: ToolChoice.Any },
+  "gemini-3.7-flash-high",
+);
+assert.deepEqual(anyReq.request.toolConfig, {
+  functionCallingConfig: { mode: GeminiToolCallingMode.Any },
+});
+
+const reqChoice = buildRequest(
+  flash37Model,
+  dummyToolsContext,
+  "test-proj",
+  { toolChoice: ToolChoice.Required },
+  "gemini-3.7-flash-high",
+);
+assert.deepEqual(reqChoice.request.toolConfig, {
+  functionCallingConfig: { mode: GeminiToolCallingMode.Any },
+});
+
+// 8. String literals compatibility (Pi SimpleStreamOptions)
+const stringAutoReq = buildRequest(
+  flash37Model,
+  dummyToolsContext,
+  "test-proj",
+  { toolChoice: "auto" },
+  "gemini-3.7-flash-high",
+);
+assert.equal(stringAutoReq.request.toolConfig, undefined);
+
+const stringNoneReq = buildRequest(
+  flash37Model,
+  dummyToolsContext,
+  "test-proj",
+  { toolChoice: "none" },
+  "gemini-3.7-flash-high",
+);
+assert.deepEqual(stringNoneReq.request.toolConfig, {
+  functionCallingConfig: { mode: GeminiToolCallingMode.None },
+});
 
 console.log(
   `model routing: ${routeCases.length} cases, tool schema, errors, project ids, token clamping, and message conversion passed`,

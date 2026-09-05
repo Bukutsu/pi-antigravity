@@ -31,6 +31,7 @@ export type DynamicModelInfo = {
   experiments?: string[];
   apiProvider?: string;
   modelProvider?: string;
+  model?: string;
 };
 
 export type CallbackServer = {
@@ -50,8 +51,8 @@ export type AntigravityRouting = {
 export const ANTIGRAVITY_API = "antigravity-api" as const;
 export type AntigravityApi = typeof ANTIGRAVITY_API;
 
-export type AntigravityStreamOptions = SimpleStreamOptions & {
-  toolChoice?: ToolChoice;
+export type AntigravityStreamOptions = Omit<SimpleStreamOptions, "toolChoice"> & {
+  toolChoice?: ToolChoice | `${ToolChoice}`;
 };
 
 export type GeminiTextPart = { text: string; thoughtSignature?: string };
@@ -101,14 +102,15 @@ export type GeminiToolConfig = {
   };
 };
 
+export type ThinkingWire = {
+  includeThoughts: boolean;
+  thinkingBudget: number;
+};
+
 export type GeminiGenerationConfig = {
   temperature?: number;
   maxOutputTokens?: number;
-  thinkingConfig?: {
-    includeThoughts?: boolean;
-    thinkingLevel?: "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
-    thinkingBudget?: number;
-  };
+  thinkingConfig?: ThinkingWire;
 };
 
 export type GeminiRequestBody = {
@@ -260,6 +262,7 @@ export type ModelInfoRaw = {
   displayName?: unknown;
   label?: unknown;
   modelName?: unknown;
+  model?: unknown;
   modelProvider?: unknown;
   apiProvider?: unknown;
   supportsThinking?: unknown;
