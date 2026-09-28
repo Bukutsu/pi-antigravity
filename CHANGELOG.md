@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-28
+
+### Added
+
+- **Google Search grounding:** `google_search` and `/antigravity.search` run an isolated Cloud Code Assist search request through the signed-in session (#62).
+
+### Fixed
+
+- **Oh My Pi install:** Load `registerApiProvider` from a namespace import so `omp plugin install npm:pi-antigravity` does not fail when the bundled Pi runtime omits that export (#61).
+- **Wire fingerprint:** Match Antigravity CLI 1.2.4 user-agent labels and keep multi-turn `last_execution_id` off the first step, with separate trajectory ids per session (#63).
+
 ## [0.8.0] - 2026-09-20
 
 ### Added

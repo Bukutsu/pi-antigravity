@@ -165,17 +165,37 @@ export function buildSearchRequest(
  * @param data - Raw JSON response from Antigravity generateContent API.
  * @returns Structured SearchResult with synthesized text, web queries, and cited source URLs.
  */
+function candidateList(data: unknown): unknown {
+  if (!isRecord(data)) return undefined;
+  if (isRecord(data.response)) return data.response.candidates;
+  return data.candidates;
+}
+
+function firstUnknownItem(value: unknown): unknown {
+  if (!Array.isArray(value)) return undefined;
+  return (value as unknown[])[0];
+}
+
 export function parseSearchResponse(data: unknown): SearchResult {
   const result: SearchResult = { text: "", sources: [], queries: [] };
   if (!isRecord(data)) return result;
 
   const responseObj = isRecord(data.response) ? data.response : data;
-  const candidates = Array.isArray(responseObj.candidates) ? responseObj.candidates : [];
+  const candidates = Array.isArray(responseObj.candidates)
+    ? (responseObj.candidates as unknown[])
+    : [];
   const candidate = candidates[0];
 
   if (!isRecord(candidate)) {
-    const errorObj = isRecord(data.error) ? data.error : isRecord(responseObj.error) ? responseObj.error : undefined;
-    const msg = typeof errorObj?.message === "string" ? errorObj.message : "No candidate returned from Antigravity Search";
+    const errorObj = isRecord(data.error)
+      ? data.error
+      : isRecord(responseObj.error)
+        ? responseObj.error
+        : undefined;
+    const msg =
+      typeof errorObj?.message === "string"
+        ? errorObj.message
+        : "No candidate returned from Antigravity Search";
     result.text = `Error: ${msg}`;
     return result;
   }
@@ -261,15 +281,12 @@ export async function executeAntigravitySearch(options: ExecuteSearchOptions): P
       if (options.signal?.aborted) throw new Error("Search request was aborted");
 
       try {
-        const response = await antigravityFetch(
-          `${endpoint}/v1internal:generateContent`,
-          {
-            method: "POST",
-            headers,
-            body,
-            signal: options.signal,
-          },
-        );
+        const response = await antigravityFetch(`${endpoint}/v1internal:generateContent`, {
+          method: "POST",
+          headers,
+          body,
+          signal: options.signal,
+        });
 
         if (!response.ok) {
           lastError = jsonOrTextError(await response.text()).slice(0, 400);
@@ -281,11 +298,7 @@ export async function executeAntigravitySearch(options: ExecuteSearchOptions): P
         }
 
         const data: unknown = await response.json();
-        const cand = isRecord(data) && isRecord(data.response) && Array.isArray(data.response.candidates)
-          ? data.response.candidates[0]
-          : isRecord(data) && Array.isArray(data.candidates)
-          ? data.candidates[0]
-          : undefined;
+        const cand = firstUnknownItem(candidateList(data));
 
         const candidateText =
           isRecord(cand) && isRecord(cand.content) && Array.isArray(cand.content.parts)

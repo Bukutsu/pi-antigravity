@@ -45,6 +45,8 @@ Or install the latest repository version:
 pi install git:github.com/Rahularya01/pi-antigravity
 ```
 
+On Oh My Pi, install the same package with `omp plugin install npm:pi-antigravity`.
+
 Restart Pi (or run `/reload`) after installation. To update the npm package later, use `pi update npm:pi-antigravity`.
 
 ## Quick start
@@ -190,6 +192,7 @@ Provider requests reuse a keep-alive connection pool when the runtime supports i
 - **Claude/GPT tool-call schema error:** Upgrade to the latest package release. The provider adapts Pi's JSON Schema tool definitions for the Cloud Code Assist custom-tool bridge.
 - **Quota or rate limit:** Run `/antigravity.usage`. A `429` response usually indicates quota or rate limiting; changing models may still draw from the same shared pool.
 - **Need a safe diagnostic:** `/antigravity.doctor` redacts recognized secrets from its error output. Still review output before sharing it publicly.
+- **Oh My Pi says `registerApiProvider` is not exported:** Upgrade to 0.8.1 or later. Older builds statically import a Pi compat export that Oh My Pi's bundled runtime does not provide. The provider still registers through `pi.registerProvider` on that host.
 
 ## Development
 
