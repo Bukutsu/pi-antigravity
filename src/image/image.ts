@@ -173,6 +173,7 @@ function imageExtension(mimeType: string): string {
   return "png";
 }
 
+/** Sanitizes a user-supplied image name into a clean, lowercase filename with underscores. */
 export function sanitizeImageFileName(name: string): string {
   const cleaned = name
     .trim()
@@ -183,6 +184,10 @@ export function sanitizeImageFileName(name: string): string {
   return cleaned || "image";
 }
 
+/**
+ * Validates and loads a local reference image within the workspace, returning base64 data and MIME type.
+ * Rejects paths outside the workspace, non-image extensions, and files exceeding the size limit.
+ */
 export async function loadImageFromPath(
   cwd: string,
   rawPath: string,
@@ -208,6 +213,7 @@ export async function loadImageFromPath(
   };
 }
 
+/** Validates that the requested image model identifier matches supported patterns. */
 export function assertSafeImageModel(modelId: string): string {
   const id = modelId.trim();
   if (id.length === 0 || id.length > 80) {
@@ -219,6 +225,7 @@ export function assertSafeImageModel(modelId: string): string {
   return id;
 }
 
+/** Validates that the requested aspect ratio is one of the supported aspect ratios. */
 export function assertSafeAspectRatio(ratio: string): ImageAspectRatio {
   const value = ratio.trim();
   for (const allowed of IMAGE_ASPECT_RATIOS) {
@@ -229,6 +236,7 @@ export function assertSafeAspectRatio(ratio: string): ImageAspectRatio {
   );
 }
 
+/** Parses CLI command arguments for /antigravity.image (--name, --ratio, --image, --model, --path). */
 export function parseImageCommandArgs(args: string): ImageCommandArgs {
   const tokens = args.trim().split(/\s+/).filter(Boolean);
   const out: ImageCommandArgs = { prompt: "" };
@@ -273,6 +281,10 @@ export function parseImageCommandArgs(args: string): ImageCommandArgs {
   return out;
 }
 
+/**
+ * Resolves the destination file path for saving a generated image inside the workspace directory.
+ * If imageName is provided, saves directly in cwd as <imageName>.<ext> matching official agy behavior.
+ */
 export function resolveImageSavePath(
   cwd: string,
   requested?: string,
@@ -310,6 +322,7 @@ export function resolveImageSavePath(
   return `${target.slice(0, -currentExt.length)}${suffix}${currentExt}`;
 }
 
+/** Constructs an Antigravity image generation request payload matching the official agy wire protocol. */
 export function buildImageGenerateRequest(
   prompt: string,
   model: string,
@@ -361,6 +374,7 @@ function collectImagesFromParts(
   }
 }
 
+/** Collects generated images and text commentary from an Antigravity SSE stream response. */
 export async function collectImagesFromSse(
   response: Response,
   signal?: AbortSignal,
@@ -662,6 +676,10 @@ export async function generateAntigravityImages(
   };
 }
 
+/**
+ * Generates an image via Antigravity, writes the output files to disk, and returns the saved paths.
+ * Used by the /antigravity.image slash command and the generate_image tool.
+ */
 export async function generateAntigravityImage(
   options: GenerateImageOptions,
 ): Promise<GenerateImageResult> {
