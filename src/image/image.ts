@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AssistantImages, ImagesContext, ImagesOptions } from "@earendil-works/pi-ai";
@@ -11,7 +12,7 @@ import {
 import { AntigravityRequestType, AntigravityUserAgent, GeminiRole } from "../types/enums.js";
 import { antigravityFetch } from "../utils/http.js";
 import { safeError } from "../utils/security.js";
-import { antigravityRequestEnvelope, sanitizeText } from "../utils/util.js";
+import { sanitizeText } from "../utils/util.js";
 
 export const DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image";
 export const ANTIGRAVITY_IMAGE_API = "antigravity-images";
@@ -86,6 +87,15 @@ export const IMAGE_SYSTEM_INSTRUCTION =
   "You are an AI image generator. Generate images based on user descriptions. Focus on creating high-quality, visually appealing images that match the user's request.";
 const DEFAULT_IMAGE_DIR = join(".pi", "generated-images");
 const MAX_PROMPT_CHARS = 8000;
+const MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024;
+
+const REFERENCE_IMAGE_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+};
 
 export type GeneratedImage = { data: string; mimeType: string };
 
@@ -178,13 +188,20 @@ export async function loadImageFromPath(
   rawPath: string,
 ): Promise<{ mimeType: string; data: string }> {
   const root = resolve(cwd);
-  const fullPath = isAbsolute(rawPath) ? rawPath : resolve(root, rawPath);
-  const bytes = await readFile(fullPath);
+  const fullPath = resolve(root, rawPath);
+  const rel = relative(root, fullPath);
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error("Reference image path must be inside the working directory.");
+  }
   const ext = extname(fullPath).toLowerCase();
-  let mimeType = "image/jpeg";
-  if (ext === ".png") mimeType = "image/png";
-  else if (ext === ".webp") mimeType = "image/webp";
-  else if (ext === ".gif") mimeType = "image/gif";
+  const mimeType = REFERENCE_IMAGE_MIME[ext];
+  if (!mimeType) {
+    throw new Error("Reference image must be .png, .jpg, .jpeg, .webp, or .gif.");
+  }
+  const bytes = await readFile(fullPath);
+  if (bytes.length > MAX_REFERENCE_IMAGE_BYTES) {
+    throw new Error("Reference image exceeds maximum size of 20MB.");
+  }
   return {
     mimeType,
     data: bytes.toString("base64"),
@@ -263,11 +280,6 @@ export function resolveImageSavePath(
   mimeType = "image/jpeg",
   index?: number,
 ): string {
-  if (imageName && imageName.includes("/")) {
-    index = typeof mimeType === "number" ? mimeType : index;
-    mimeType = imageName;
-    imageName = undefined;
-  }
   const ext = imageExtension(mimeType);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const suffix = index === undefined ? "" : `-${index + 1}`;
@@ -305,7 +317,6 @@ export function buildImageGenerateRequest(
   aspectRatio: string,
   inputImages?: Array<{ mimeType: string; data: string }>,
 ): ImageGenerateRequest {
-  const envelope = antigravityRequestEnvelope(model, false);
   const parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [];
   if (prompt) {
     parts.push({ text: sanitizeText(prompt) });
@@ -330,7 +341,7 @@ export function buildImageGenerateRequest(
     },
     requestType: AntigravityRequestType.ImageGen,
     userAgent: AntigravityUserAgent.Antigravity,
-    requestId: `image_gen/${Date.now()}/${envelope.requestId.slice(6)}/1`,
+    requestId: `image_gen/${Date.now()}/${randomUUID()}/1`,
   };
 }
 
@@ -546,9 +557,32 @@ export async function generateAntigravityImages(
               timestamp: Date.now(),
             };
           }
+          // Response was 200 OK but returned no images (e.g. content refusal/note); do not duplicate call to SSE.
+          lastError = text.join(" ").trim() || "No image data returned.";
+          continue;
         }
 
-        // Fallback: try streamGenerateContent if direct endpoint returned 404 or empty
+        // On non-OK direct responses: if not 404, consume body and continue to next endpoint without duplicate call
+        if (response.status !== 404) {
+          lastError = jsonOrTextError(await response.text()).slice(0, 400);
+          if ([403, 429, 500, 502, 503, 504].includes(response.status)) {
+            continue;
+          }
+          return {
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            output: [],
+            stopReason: "error",
+            errorMessage: `Antigravity image request failed (${response.status}): ${safeError(lastError)}`,
+            timestamp: Date.now(),
+          };
+        }
+
+        // Consume 404 body before falling back to SSE
+        await response.text();
+
+        // Fallback: try streamGenerateContent only if direct endpoint returned 404
         const streamResponse = await antigravityFetch(
           `${endpoint}/v1internal:streamGenerateContent?alt=sse`,
           {

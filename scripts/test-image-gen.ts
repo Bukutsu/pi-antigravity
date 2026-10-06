@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { writeFile } from "node:fs/promises";
 import {
   ANTIGRAVITY_IMAGE_API,
   ANTIGRAVITY_IMAGE_MODELS,
@@ -9,6 +10,7 @@ import {
   buildImageGenerateRequest,
   collectImagesFromSse,
   generateAntigravityImages,
+  loadImageFromPath,
   parseImageCommandArgs,
   resolveImageSavePath,
   sanitizeImageFileName,
@@ -94,7 +96,10 @@ async function main() {
   assert(req.request.contents[0]?.parts[0]?.text === "a lighthouse", "prompt text");
   assert(req.request.contents[0]?.parts[1]?.inlineData?.data === "AQID", "inlineData image part");
   assert(req.requestType === "image_gen", "requestType is image_gen");
-  assert(/^image_gen\//.test(req.requestId), "image_gen request id");
+  assert(
+    /^image_gen\/\d+\/[0-9a-f-]{36}\/1$/.test(req.requestId),
+    `image_gen request id with single timestamp and UUID: ${req.requestId}`,
+  );
 
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
   const body =
@@ -117,7 +122,7 @@ async function main() {
     assert(saved === join(tmp, "out/cat.png"), `save path ${saved}`);
     const agySaved = resolveImageSavePath(tmp, undefined, "red_square", "image/jpeg");
     assert(agySaved === join(tmp, "red_square.jpg"), `agy naming save path ${agySaved}`);
-    const dirSaved = resolveImageSavePath(tmp, "images", "image/jpeg", 0);
+    const dirSaved = resolveImageSavePath(tmp, "images", undefined, "image/jpeg", 0);
     assert(dirSaved.endsWith("-1.jpg"), `dir save ${dirSaved}`);
     assert(dirSaved.startsWith(join(tmp, "images")), "dir stays in cwd");
     try {
@@ -127,6 +132,34 @@ async function main() {
       assert(
         error instanceof Error && /inside the working directory/.test(error.message),
         "reject traversal",
+      );
+    }
+
+    // Reference image loading security checks
+    const samplePngPath = join(tmp, "sample.png");
+    await writeFile(samplePngPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const loaded = await loadImageFromPath(tmp, "sample.png");
+    assert(loaded.mimeType === "image/png", "sample png loaded");
+
+    try {
+      await loadImageFromPath(tmp, "../escape.png");
+      fail("expected reference image traversal to throw");
+    } catch (error) {
+      assert(
+        error instanceof Error && /Reference image path must be inside/.test(error.message),
+        "reject reference image traversal",
+      );
+    }
+
+    try {
+      const badExtPath = join(tmp, "secret.key");
+      await writeFile(badExtPath, "secret");
+      await loadImageFromPath(tmp, "secret.key");
+      fail("expected unsupported image format to throw");
+    } catch (error) {
+      assert(
+        error instanceof Error && /Reference image must be/.test(error.message),
+        "reject non-image reference file",
       );
     }
   } finally {
