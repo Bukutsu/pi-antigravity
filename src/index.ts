@@ -1,9 +1,4 @@
-import { relative } from "node:path";
-import type {
-  ExtensionAPI,
-  ExtensionCommandContext,
-  ProviderModelConfig,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 // Namespace import: Oh My Pi rewrites this specifier onto bundled pi-ai, which
 // does not export registerApiProvider. A static named import fails plugin load.
@@ -21,11 +16,8 @@ import {
 import { DEFAULT_ENDPOINT } from "./client/index.js";
 import { getLastDiagnostics, runWithDiagnostics } from "./diagnostics/index.js";
 import {
-  ANTIGRAVITY_IMAGE_API,
-  ANTIGRAVITY_IMAGE_MODELS,
   DEFAULT_IMAGE_MODEL,
   generateAntigravityImage,
-  generateAntigravityImages,
   IMAGE_ASPECT_RATIOS,
   parseImageCommandArgs,
 } from "./image/index.js";
@@ -110,34 +102,6 @@ type CompatApiProviderRegistrar = (provider: {
   streamSimple: typeof streamAntigravity;
 }) => void;
 
-type CompatImagesProviderRegistrar = (provider: {
-  api: typeof ANTIGRAVITY_IMAGE_API;
-  generateImages: typeof generateAntigravityImages;
-}) => void;
-
-interface AntigravityProviderRegistrationConfig {
-  name: string;
-  baseUrl: string;
-  api: typeof ANTIGRAVITY_API;
-  models: ProviderModelConfig[];
-  refreshModels: (
-    context: Parameters<typeof refreshAntigravityModels>[0],
-  ) => Promise<ProviderModelConfig[]>;
-  oauth: {
-    name: string;
-    login: typeof loginAndRemember;
-    refreshToken: typeof refreshAndRemember;
-    getApiKey: typeof getApiKey;
-  };
-  streamSimple: typeof streamAntigravity;
-  images?: Record<
-    string,
-    {
-      generateImages: typeof generateAntigravityImages;
-    }
-  >;
-}
-
 /**
  * Pi dispatches custom APIs through the compat registry. Oh My Pi does not
  * export `registerApiProvider` and registers the stream inside `registerProvider`.
@@ -145,24 +109,12 @@ interface AntigravityProviderRegistrationConfig {
 function registerCompatApiProvider(): void {
   const register = (piAiCompat as { registerApiProvider?: CompatApiProviderRegistrar })
     .registerApiProvider;
-  if (typeof register === "function") {
-    register({
-      api: ANTIGRAVITY_API,
-      stream: streamAntigravity,
-      streamSimple: streamAntigravity,
-    });
-  }
-  const registerImages = (
-    piAiCompat as unknown as {
-      registerImagesApiProvider?: CompatImagesProviderRegistrar;
-    }
-  ).registerImagesApiProvider;
-  if (typeof registerImages === "function") {
-    registerImages({
-      api: ANTIGRAVITY_IMAGE_API,
-      generateImages: generateAntigravityImages,
-    });
-  }
+  if (typeof register !== "function") return;
+  register({
+    api: ANTIGRAVITY_API,
+    stream: streamAntigravity,
+    streamSimple: streamAntigravity,
+  });
 }
 
 export default function (pi: ExtensionAPI): void {
@@ -170,15 +122,12 @@ export default function (pi: ExtensionAPI): void {
 
   const initialCatalog = getCurrentAntigravityCatalog();
 
-  const providerConfig: AntigravityProviderRegistrationConfig = {
+  pi.registerProvider(PROVIDER_ID, {
     name: PROVIDER_NAME,
     baseUrl: DEFAULT_ENDPOINT,
     api: ANTIGRAVITY_API,
-    models: [...initialCatalog.models, ...ANTIGRAVITY_IMAGE_MODELS],
-    refreshModels: async (context) => {
-      const refreshed = await refreshAntigravityModels(context);
-      return [...refreshed, ...ANTIGRAVITY_IMAGE_MODELS];
-    },
+    models: initialCatalog.models,
+    refreshModels: refreshAntigravityModels,
     oauth: {
       name: PROVIDER_NAME,
       login: loginAndRemember,
@@ -186,17 +135,7 @@ export default function (pi: ExtensionAPI): void {
       getApiKey,
     },
     streamSimple: streamAntigravity,
-    images: {
-      [ANTIGRAVITY_IMAGE_API]: {
-        generateImages: generateAntigravityImages,
-      },
-    },
-  };
-
-  pi.registerProvider(
-    PROVIDER_ID,
-    providerConfig as unknown as Parameters<typeof pi.registerProvider>[1],
-  );
+  });
 
   pi.registerCommand("antigravity.usage", {
     description: "Show Antigravity shared quota pools (Gemini / Claude+GPT, 5h + weekly)",
@@ -338,13 +277,13 @@ export default function (pi: ExtensionAPI): void {
 
   pi.registerCommand("antigravity.image", {
     description:
-      "Generate or edit an image via Antigravity (usage: /antigravity.image [--name <image_name>] [--ratio 16:9] [--image <ref.png>] <prompt>)",
+      "Generate an image via Antigravity (usage: /antigravity.image [--ratio 16:9] <prompt>)",
     handler: async (args, ctx) => {
       const parsed = parseImageCommandArgs(args || "");
       if (!parsed.prompt) {
         emitCommandOutput(
           ctx,
-          "Usage: /antigravity.image [--name <image_name>] [--ratio 16:9] [--image <path>] [--model gemini-3.1-flash-image] [--path file.png] <prompt>",
+          "Usage: /antigravity.image [--ratio 16:9] [--model gemini-3-pro-image] [--path file.png] <prompt>",
           "warning",
         );
         return;
@@ -365,8 +304,6 @@ export default function (pi: ExtensionAPI): void {
           cwd: ctx.cwd,
           prompt: parsed.prompt,
           aspectRatio: parsed.aspectRatio,
-          imageName: parsed.imageName,
-          imagePaths: parsed.imagePaths,
           model: parsed.model,
           path: parsed.path,
         });
@@ -421,54 +358,14 @@ export default function (pi: ExtensionAPI): void {
       name: "generate_image",
       label: "Generate image",
       description:
-        "Generate and edit images via Antigravity (Gemini 3.1 Flash Image). Supports detailed prompts, aspect ratios, image naming, and reference images for image-to-image editing.",
-      promptSnippet:
-        "Generate and edit images via Antigravity (Gemini 3.1 Flash Image / Nano Banana 2)",
+        "Generate an image via Antigravity using the signed-in Google account. Saves under .pi/generated-images/ unless path is set.",
+      promptSnippet: "Generate images via Antigravity OAuth (Gemini image models)",
       promptGuidelines: [
-        "Use generate_image when the user asks to create, draw, edit, or generate an image.",
-        "Write a detailed prompt: subject, style, composition, lighting, and any exact text in quotes.",
-        "Provide a short descriptive image_name in lowercase with underscores (e.g. 'login_mockup', 'cyber_koi'). Maximum 3 words.",
-        "Pass source or reference images via image_paths when editing, combining, or using existing images as reference (maximum 3 images).",
-        "Check each result against the brief. If it clearly misses, fix the prompt; at most 3 attempts per image.",
+        "Use generate_image when the user asks to create, draw, or generate an image.",
       ],
       parameters: Type.Object({
-        prompt: Type.String({
-          description:
-            "The text prompt describing the image to generate or the edit instructions. Be detailed: subject, style, composition, lighting, and any exact text in quotes.",
-        }),
-        image_name: Type.Optional(
-          Type.String({
-            description:
-              "Short descriptive filename for the saved image. Should be all lowercase with underscores, describing what the image contains (e.g. 'login_mockup', 'cyber_koi'). Maximum 3 words.",
-          }),
-        ),
-        imageName: Type.Optional(
-          Type.String({
-            description: "Alias for image_name.",
-          }),
-        ),
-        image_paths: Type.Optional(
-          Type.Array(Type.String(), {
-            description:
-              "Optional paths to existing images on disk to edit, combine, or use as visual reference (maximum 3 images).",
-          }),
-        ),
-        imagePaths: Type.Optional(
-          Type.Array(Type.String(), {
-            description: "Alias for image_paths.",
-          }),
-        ),
-        aspect_ratio: Type.Optional(
-          StringEnum(IMAGE_ASPECT_RATIOS, {
-            description:
-              "Optional aspect ratio for the generated image. Supported values: '1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9'. Default is '1:1'.",
-          }),
-        ),
-        aspectRatio: Type.Optional(
-          StringEnum(IMAGE_ASPECT_RATIOS, {
-            description: "Alias for aspect_ratio.",
-          }),
-        ),
+        prompt: Type.String({ description: "Image description." }),
+        aspectRatio: Type.Optional(StringEnum(IMAGE_ASPECT_RATIOS)),
         model: Type.Optional(
           Type.String({
             description: `Image model id. Default: ${DEFAULT_IMAGE_MODEL}.`,
@@ -476,8 +373,7 @@ export default function (pi: ExtensionAPI): void {
         ),
         path: Type.Optional(
           Type.String({
-            description:
-              "Project-relative file or directory to save the image (overrides default naming).",
+            description: "Project-relative file or directory to save the image.",
           }),
         ),
       }),
@@ -491,25 +387,17 @@ export default function (pi: ExtensionAPI): void {
           apiKey,
           cwd: ctx.cwd,
           prompt: params.prompt,
-          aspectRatio: params.aspect_ratio || params.aspectRatio,
-          imageName: params.image_name || params.imageName,
-          imagePaths: params.image_paths || params.imagePaths,
+          aspectRatio: params.aspectRatio,
           model: params.model,
           path: params.path,
           signal,
         });
-        const savedList = result.savedPaths
-          .map((p) => {
-            const rel = relative(ctx.cwd, p);
-            return `- **File**: [${rel}](${rel})`;
-          })
-          .join("\n");
         const notes = result.text.join(" ").trim();
         return {
           content: [
             {
               type: "text" as const,
-              text: `The image has been generated:\n\n${savedList}${notes ? `\n\n${notes}` : ""}`,
+              text: `Saved image to ${result.savedPaths.join(", ")}${notes ? `. ${notes}` : ""}`,
             },
             ...result.images.map((image) => ({
               type: "image" as const,

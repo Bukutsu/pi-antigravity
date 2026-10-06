@@ -1,19 +1,17 @@
+import { deepStrictEqual, rejects } from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeFile } from "node:fs/promises";
 import {
-  ANTIGRAVITY_IMAGE_API,
-  ANTIGRAVITY_IMAGE_MODELS,
+  DEFAULT_IMAGE_MODEL,
+  requestImageResponse,
+  parseImageResponse,
   assertSafeAspectRatio,
   assertSafeImageModel,
   buildImageGenerateRequest,
   collectImagesFromSse,
-  generateAntigravityImages,
-  loadImageFromPath,
   parseImageCommandArgs,
   resolveImageSavePath,
-  sanitizeImageFileName,
 } from "../src/image/index.js";
 
 function fail(message: string): never {
@@ -54,15 +52,6 @@ async function main() {
   assert(withPath.path === "out/cat.png", "path parsed");
   assert(withPath.prompt === "a cat", "prompt after flags");
 
-  const withAgyFlags = parseImageCommandArgs("--name my_koi --image ref.png --image ref2.jpg a koi pond");
-  assert(withAgyFlags.imageName === "my_koi", "imageName parsed");
-  assert(withAgyFlags.imagePaths?.length === 2, "2 image paths parsed");
-  assert(withAgyFlags.imagePaths[0] === "ref.png", "first image path");
-  assert(withAgyFlags.imagePaths[1] === "ref2.jpg", "second image path");
-  assert(withAgyFlags.prompt === "a koi pond", "prompt after agy flags");
-
-  assert(sanitizeImageFileName("My Cool Login!") === "my_cool_login", "sanitize filename");
-
   assert(parseImageCommandArgs("").prompt === "", "empty args");
   assert(assertSafeImageModel("gemini-3-pro-image") === "gemini-3-pro-image", "allow gemini image model");
   assert(assertSafeImageModel("imagen-3.0-generate-002") === "imagen-3.0-generate-002", "allow imagen");
@@ -87,19 +76,49 @@ async function main() {
     assert(error instanceof Error && /Unsupported aspect ratio/.test(error.message), "reject ratio");
   }
 
-  const req = buildImageGenerateRequest("a lighthouse", "gemini-3.1-flash-image", "proj-1", "16:9", [
-    { mimeType: "image/png", data: "AQID" },
-  ]);
-  assert(req.model === "gemini-3.1-flash-image", "request model");
+  const req = buildImageGenerateRequest("a lighthouse", "gemini-3-pro-image", "proj-1", "16:9");
+  assert(req.model === "gemini-3-pro-image", "request model");
   assert(req.project === "proj-1", "request project");
   assert(req.request.generationConfig.imageConfig.aspectRatio === "16:9", "aspect ratio");
   assert(req.request.contents[0]?.parts[0]?.text === "a lighthouse", "prompt text");
-  assert(req.request.contents[0]?.parts[1]?.inlineData?.data === "AQID", "inlineData image part");
-  assert(req.requestType === "image_gen", "requestType is image_gen");
-  assert(
-    /^image_gen\/\d+\/[0-9a-f-]{36}\/1$/.test(req.requestId),
-    `image_gen request id with single timestamp and UUID: ${req.requestId}`,
-  );
+  assert(DEFAULT_IMAGE_MODEL === "gemini-3.1-flash-image", "default image model");
+  assert(req.requestType === "image_gen", "image request type");
+  assert(/^image_gen\/\d+\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/1$/.test(req.requestId), "image request id");
+  assert(!("systemInstruction" in req.request), "no image system instruction");
+
+  for (const status of [200, 400, 403, 429, 500, 503]) {
+    const calls: string[] = [];
+    const direct = new Response("note", { status });
+    const result = await requestImageResponse("https://example.test", {}, async (url) => {
+      calls.push(url);
+      return direct;
+    });
+    deepStrictEqual(calls, ["https://example.test/v1internal:generateContent"]);
+    assert(result.response === direct && !result.streaming, "no SSE retry except 404");
+  }
+  const missing = new Response("not found", { status: 404 });
+  const calls: string[] = [];
+  const streamed = await requestImageResponse("https://example.test", {}, async (url) => {
+    calls.push(url);
+    return calls.length === 1 ? missing : new Response("data: [DONE]\\n");
+  });
+  assert(missing.bodyUsed, "404 body consumed");
+  assert(streamed.streaming, "404 enables SSE");
+  deepStrictEqual(calls, [
+    "https://example.test/v1internal:generateContent",
+    "https://example.test/v1internal:streamGenerateContent?alt=sse",
+  ]);
+  await rejects(requestImageResponse("https://example.test", {}, async () => {
+    throw new Error("aborted");
+  }), /aborted/);
+  const candidate = { content: { parts: [
+    { text: "note" }, { inlineData: { mimeType: "image/jpeg", data: "AQID" } },
+  ] } };
+  const expected = { images: [{ mimeType: "image/jpeg", data: "AQID" }], text: ["note"] };
+  deepStrictEqual(parseImageResponse({ candidates: [candidate] }), expected);
+  deepStrictEqual(parseImageResponse({ response: { candidates: [candidate] } }), expected);
+  deepStrictEqual(parseImageResponse({ candidates: [{ content: { parts: [{ text: "no image" }] } }] }),
+    { images: [], text: ["no image"] });
 
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
   const body =
@@ -120,9 +139,7 @@ async function main() {
   try {
     const saved = resolveImageSavePath(tmp, "out/cat.png");
     assert(saved === join(tmp, "out/cat.png"), `save path ${saved}`);
-    const agySaved = resolveImageSavePath(tmp, undefined, "red_square", "image/jpeg");
-    assert(agySaved === join(tmp, "red_square.jpg"), `agy naming save path ${agySaved}`);
-    const dirSaved = resolveImageSavePath(tmp, "images", undefined, "image/jpeg", 0);
+    const dirSaved = resolveImageSavePath(tmp, "images", "image/jpeg", 0);
     assert(dirSaved.endsWith("-1.jpg"), `dir save ${dirSaved}`);
     assert(dirSaved.startsWith(join(tmp, "images")), "dir stays in cwd");
     try {
@@ -134,75 +151,11 @@ async function main() {
         "reject traversal",
       );
     }
-
-    // Reference image loading security checks
-    const samplePngPath = join(tmp, "sample.png");
-    await writeFile(samplePngPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-    const loaded = await loadImageFromPath(tmp, "sample.png");
-    assert(loaded.mimeType === "image/png", "sample png loaded");
-
-    try {
-      await loadImageFromPath(tmp, "../escape.png");
-      fail("expected reference image traversal to throw");
-    } catch (error) {
-      assert(
-        error instanceof Error && /Reference image path must be inside/.test(error.message),
-        "reject reference image traversal",
-      );
-    }
-
-    try {
-      const badExtPath = join(tmp, "secret.key");
-      await writeFile(badExtPath, "secret");
-      await loadImageFromPath(tmp, "secret.key");
-      fail("expected unsupported image format to throw");
-    } catch (error) {
-      assert(
-        error instanceof Error && /Reference image must be/.test(error.message),
-        "reject non-image reference file",
-      );
-    }
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
 
-  assert(ANTIGRAVITY_IMAGE_API === "antigravity-images", "image api identifier");
-  assert(ANTIGRAVITY_IMAGE_MODELS.length >= 3, "at least 3 image models");
-  assert(ANTIGRAVITY_IMAGE_MODELS.every((m) => m.type === "image"), "models typed as image");
-  assert(
-    ANTIGRAVITY_IMAGE_MODELS.some((m) => m.id === "gemini-3-pro-image"),
-    "includes gemini-3-pro-image",
-  );
-  assert(
-    ANTIGRAVITY_IMAGE_MODELS.some((m) => m.id === "gemini-3.1-flash-image"),
-    "includes gemini-3.1-flash-image",
-  );
-
-  // Test generateAntigravityImages with no apiKey
-  const noAuthRes = await generateAntigravityImages(
-    {
-      id: "gemini-3-pro-image",
-      api: ANTIGRAVITY_IMAGE_API,
-      provider: "antigravity",
-    },
-    { input: [{ type: "text", text: "A test prompt" }] },
-  );
-  assert(noAuthRes.stopReason === "error", "no auth returns error");
-  assert(/No Antigravity credentials/.test(noAuthRes.errorMessage || ""), "credentials message");
-
-  // Test generateAntigravityImages with empty prompt
-  const emptyRes = await generateAntigravityImages(
-    {
-      id: "gemini-3-pro-image",
-      api: ANTIGRAVITY_IMAGE_API,
-      provider: "antigravity",
-    },
-    { input: [{ type: "text", text: "   " }] },
-    { apiKey: JSON.stringify({ token: "fake", projectId: "fake" }) },
-  );
-  assert(emptyRes.stopReason === "error", "empty prompt returns error");
-
-  console.log("image gen: command parsing, model/path guards, request shape, codemode integration, and SSE parse passed");
+  console.log("image gen: command parsing, model/path guards, request shape, and SSE parse passed");
 }
 
 void main();

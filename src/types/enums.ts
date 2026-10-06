@@ -34,7 +34,6 @@ export type GeminiRole = (typeof GeminiRole)[keyof typeof GeminiRole];
 export const AntigravityRequestType = {
   Agent: "agent",
   ImageGen: "image_gen",
-  WebSearch: "web_search",
 } as const;
 export type AntigravityRequestType =
   (typeof AntigravityRequestType)[keyof typeof AntigravityRequestType];
