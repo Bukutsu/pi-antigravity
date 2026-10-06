@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, open, realpath, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AssistantImages, ImagesContext, ImagesOptions } from "@earendil-works/pi-ai";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
@@ -203,14 +203,39 @@ export async function loadImageFromPath(
   if (!mimeType) {
     throw new Error("Reference image must be .png, .jpg, .jpeg, .webp, or .gif.");
   }
-  const bytes = await readFile(fullPath);
-  if (bytes.length > MAX_REFERENCE_IMAGE_BYTES) {
-    throw new Error("Reference image exceeds maximum size of 20MB.");
+  const realRoot = await realpath(root);
+  const realFile = await realpath(fullPath);
+  const realRelative = relative(realRoot, realFile);
+  if (
+    !realRelative ||
+    realRelative === ".." ||
+    realRelative.startsWith(`..${sep}`) ||
+    isAbsolute(realRelative)
+  ) {
+    throw new Error("Reference image path must be inside the working directory.");
   }
-  return {
-    mimeType,
-    data: bytes.toString("base64"),
-  };
+  const file = await open(realFile, "r");
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) throw new Error("Reference image must be a regular file.");
+    if (info.size > MAX_REFERENCE_IMAGE_BYTES) {
+      throw new Error("Reference image exceeds maximum size of 20MB.");
+    }
+    // Bound allocation and reads even if the file grows after stat.
+    const bytes = Buffer.alloc(Math.min(info.size + 1, MAX_REFERENCE_IMAGE_BYTES + 1));
+    let length = 0;
+    while (length < bytes.length) {
+      const result = await file.read(bytes, length, bytes.length - length, null);
+      if (result.bytesRead === 0) break;
+      length += result.bytesRead;
+    }
+    if (length > MAX_REFERENCE_IMAGE_BYTES || length > info.size) {
+      throw new Error("Reference image exceeds its validated size.");
+    }
+    return { mimeType, data: bytes.subarray(0, length).toString("base64") };
+  } finally {
+    await file.close();
+  }
 }
 
 /** Validates that the requested image model identifier matches supported patterns. */

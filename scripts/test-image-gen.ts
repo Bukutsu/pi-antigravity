@@ -1,7 +1,8 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeFile } from "node:fs/promises";
+import { open, symlink, writeFile } from "node:fs/promises";
+import { rejects } from "node:assert/strict";
 import {
   ANTIGRAVITY_IMAGE_API,
   ANTIGRAVITY_IMAGE_MODELS,
@@ -140,6 +141,19 @@ async function main() {
     await writeFile(samplePngPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     const loaded = await loadImageFromPath(tmp, "sample.png");
     assert(loaded.mimeType === "image/png", "sample png loaded");
+    const outside = await mkdtemp(join(tmpdir(), "pi-image-outside-"));
+    try {
+      await writeFile(join(outside, "secret.png"), "secret");
+      await symlink(join(outside, "secret.png"), join(tmp, "escape.png"));
+      await rejects(loadImageFromPath(tmp, "escape.png"), /inside the working directory/);
+      await symlink(samplePngPath, join(tmp, "inside.png"));
+      assert((await loadImageFromPath(tmp, "inside.png")).data === loaded.data, "inside symlink allowed");
+      const oversized = await open(join(tmp, "large.png"), "w");
+      try { await oversized.truncate(20 * 1024 * 1024 + 1); } finally { await oversized.close(); }
+      await rejects(loadImageFromPath(tmp, "large.png"), /maximum size/);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
 
     try {
       await loadImageFromPath(tmp, "../escape.png");
