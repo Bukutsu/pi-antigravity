@@ -41,7 +41,7 @@ export type ImageGenerateRequest = {
   project: string;
   model: string;
   request: {
-    contents: Array<{ role: "user"; parts: Array<{ text: string }> }>;
+    contents: Array<{ role: "user"; parts: Array<{ text?: string; inlineData?: GeneratedImage }> }>;
     generationConfig: {
       imageConfig: { aspectRatio: string };
       candidateCount: number;
@@ -175,12 +175,21 @@ export function buildImageGenerateRequest(
   model: string,
   projectId: string,
   aspectRatio: string,
+  inputImages: GeneratedImage[] = [],
 ): ImageGenerateRequest {
   return {
     project: projectId,
     model,
     request: {
-      contents: [{ role: GeminiRole.User, parts: [{ text: sanitizeText(prompt) }] }],
+      contents: [
+        {
+          role: GeminiRole.User,
+          parts: [
+            { text: sanitizeText(prompt) },
+            ...inputImages.map((inlineData) => ({ inlineData })),
+          ],
+        },
+      ],
       generationConfig: {
         imageConfig: { aspectRatio },
         candidateCount: 1,
@@ -285,11 +294,13 @@ async function writeImage(filePath: string, image: GeneratedImage): Promise<stri
   return filePath;
 }
 
-export async function generateAntigravityImage(
-  options: GenerateImageOptions,
-): Promise<GenerateImageResult> {
+/** Generates in-memory content shared by the native API and file-saving wrapper. */
+export async function generateAntigravityImageContent(
+  options: Omit<GenerateImageOptions, "cwd" | "path"> & { inputImages?: GeneratedImage[] },
+): Promise<Omit<GenerateImageResult, "savedPaths">> {
   const prompt = options.prompt.trim();
-  if (!prompt) throw new Error("Image prompt is required.");
+  if (!prompt && !options.inputImages?.length)
+    throw new Error("Image prompt or input image is required.");
   if (prompt.length > MAX_PROMPT_CHARS) {
     throw new Error(`Image prompt is too long (max ${MAX_PROMPT_CHARS} characters).`);
   }
@@ -302,7 +313,7 @@ export async function generateAntigravityImage(
   let lastError = "no endpoint available";
   for (const model of models) {
     const body = JSON.stringify(
-      buildImageGenerateRequest(prompt, model, creds.projectId, aspectRatio),
+      buildImageGenerateRequest(prompt, model, creds.projectId, aspectRatio, options.inputImages),
     );
     for (const endpoint of endpointCandidates()) {
       if (options.signal?.aborted) throw new Error("Request was aborted");
@@ -329,22 +340,7 @@ export async function generateAntigravityImage(
           lastError = parsed.text.join(" ").trim() || "No image data returned.";
           continue;
         }
-        const savedPaths: string[] = [];
-        const many = parsed.images.length > 1;
-        for (const [index, image] of parsed.images.entries()) {
-          savedPaths.push(
-            await writeImage(
-              resolveImageSavePath(
-                options.cwd,
-                options.path,
-                image.mimeType,
-                many ? index : undefined,
-              ),
-              image,
-            ),
-          );
-        }
-        return { images: parsed.images, savedPaths, text: parsed.text, model };
+        return { images: parsed.images, text: parsed.text, model };
       } catch (error) {
         lastError = safeError(error);
         if (options.signal?.aborted) {
@@ -354,4 +350,26 @@ export async function generateAntigravityImage(
     }
   }
   throw new Error(`Antigravity image generation failed: ${safeError(lastError)}`);
+}
+
+/** Saves generated images for the existing tool and slash command. */
+export async function generateAntigravityImage(
+  options: GenerateImageOptions,
+): Promise<GenerateImageResult> {
+  const result = await generateAntigravityImageContent(options);
+  const savedPaths: string[] = [];
+  for (const [index, image] of result.images.entries()) {
+    savedPaths.push(
+      await writeImage(
+        resolveImageSavePath(
+          options.cwd,
+          options.path,
+          image.mimeType,
+          result.images.length > 1 ? index : undefined,
+        ),
+        image,
+      ),
+    );
+  }
+  return { ...result, savedPaths };
 }

@@ -119,6 +119,21 @@ The extension also registers a `generate_image` tool the model can call. Images 
 
 It also registers a `google_search` tool allowing models to perform real-time web search and URL analysis using Google Search Grounding over Cloud Code Assist (powered by `gemini-3-flash` with dynamic fallback). It supports optional lead agent directives (`instruction`), specific target URLs (`urls`), and deep reasoning (`thinking: true`).
 
+### Native image API
+
+On Pi versions that support mixed-operation provider registration (`type: "image"` and `images` handlers), Antigravity exposes `gemini-3.1-flash-image` to codemode and `ctx.modelRegistry.generateImages()`. Older Pi versions can continue using the existing image tool and command; the native API is not available there.
+
+```js
+const model = await models.getModelOfType("image", "antigravity", "gemini-3.1-flash-image");
+const result = await models.generateImages(model, {
+  input: [{ type: "text", text: "A red square on white" }],
+});
+if (result.stopReason !== "stop") return result.errorMessage;
+for (const block of result.output) if (block.type === "image") image(block);
+```
+
+The native API returns in-memory image/text blocks and does not save files. Input image blocks are accepted without local path loading. Extensions can pass `metadata: { aspectRatio: "16:9" }` through image options. Credentials are resolved by Pi. Backend usage is not currently reported by this adapter.
+
 ## Models and routing
 
 After you sign in, the provider refreshes its catalog from Antigravity (`fetchAvailableModels`) and groups runtime thinking variants into public Pi model IDs. Newly enabled models — for example a new Gemini Flash generation — become selectable after that refresh without waiting for an extension release. A last-known-good cache is kept for offline/cold start; the static table below is only the conservative fallback and a routing reference.

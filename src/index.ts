@@ -1,4 +1,9 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import {
+  ANTIGRAVITY_IMAGE_API,
+  ANTIGRAVITY_IMAGE_MODELS,
+  generateAntigravityImages,
+} from "./image/native.js";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 // Namespace import: Oh My Pi rewrites this specifier onto bundled pi-ai, which
 // does not export registerApiProvider. A static named import fails plugin load.
@@ -102,6 +107,11 @@ type CompatApiProviderRegistrar = (provider: {
   streamSimple: typeof streamAntigravity;
 }) => void;
 
+type CompatImagesProviderRegistrar = (provider: {
+  api: typeof ANTIGRAVITY_IMAGE_API;
+  generateImages: typeof generateAntigravityImages;
+}) => void;
+
 /**
  * Pi dispatches custom APIs through the compat registry. Oh My Pi does not
  * export `registerApiProvider` and registers the stream inside `registerProvider`.
@@ -109,12 +119,24 @@ type CompatApiProviderRegistrar = (provider: {
 function registerCompatApiProvider(): void {
   const register = (piAiCompat as { registerApiProvider?: CompatApiProviderRegistrar })
     .registerApiProvider;
-  if (typeof register !== "function") return;
-  register({
-    api: ANTIGRAVITY_API,
-    stream: streamAntigravity,
-    streamSimple: streamAntigravity,
-  });
+  if (typeof register === "function") {
+    register({
+      api: ANTIGRAVITY_API,
+      stream: streamAntigravity,
+      streamSimple: streamAntigravity,
+    });
+  }
+  const registerImages = (
+    piAiCompat as unknown as {
+      registerImagesApiProvider?: CompatImagesProviderRegistrar;
+    }
+  ).registerImagesApiProvider;
+  if (typeof registerImages === "function") {
+    registerImages({
+      api: ANTIGRAVITY_IMAGE_API,
+      generateImages: generateAntigravityImages,
+    });
+  }
 }
 
 export default function (pi: ExtensionAPI): void {
@@ -122,12 +144,15 @@ export default function (pi: ExtensionAPI): void {
 
   const initialCatalog = getCurrentAntigravityCatalog();
 
-  pi.registerProvider(PROVIDER_ID, {
+  const providerConfig = {
     name: PROVIDER_NAME,
     baseUrl: DEFAULT_ENDPOINT,
     api: ANTIGRAVITY_API,
-    models: initialCatalog.models,
-    refreshModels: refreshAntigravityModels,
+    models: [...initialCatalog.models, ...ANTIGRAVITY_IMAGE_MODELS],
+    refreshModels: async (context: Parameters<typeof refreshAntigravityModels>[0]) => {
+      const refreshed = await refreshAntigravityModels(context);
+      return [...refreshed, ...ANTIGRAVITY_IMAGE_MODELS];
+    },
     oauth: {
       name: PROVIDER_NAME,
       // Antigravity access is quota-backed by the Google account, not metered per token.
@@ -138,7 +163,18 @@ export default function (pi: ExtensionAPI): void {
       getApiKey,
     },
     streamSimple: streamAntigravity,
-  });
+    images: {
+      [ANTIGRAVITY_IMAGE_API]: {
+        generateImages: generateAntigravityImages,
+      },
+    },
+  };
+
+  // Pi 0.86 types are chat-only; newer Pi accepts mixed-operation models and images.
+  pi.registerProvider(
+    PROVIDER_ID,
+    providerConfig as unknown as Parameters<typeof pi.registerProvider>[1],
+  );
 
   pi.registerCommand("antigravity.usage", {
     description: "Show Antigravity shared quota pools (Gemini / Claude+GPT, 5h + weekly)",
