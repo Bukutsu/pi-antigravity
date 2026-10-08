@@ -29,14 +29,27 @@ Guidelines:
 4. Structure your response into clean, logical Markdown sections citing direct sources.`;
 
 export type SearchSource = {
+  /** Original groundingChunks index, including gaps from skipped non-web chunks. */
+  index?: number;
   title: string;
   url: string;
+};
+
+export type SearchSupport = {
+  text: string;
+  startIndex?: number;
+  endIndex?: number;
+  partIndex?: number;
+  sourceIndices: number[];
 };
 
 export type SearchResult = {
   text: string;
   sources: SearchSource[];
   queries: string[];
+  /** Optional so existing callers can still construct results with the original shape. */
+  parts?: Array<{ index: number; text: string }>;
+  supports?: SearchSupport[];
 };
 
 export type ExecuteSearchOptions = {
@@ -159,25 +172,28 @@ export function buildSearchRequest(
   };
 }
 
-/**
- * Parse candidate text and Grounding metadata from Antigravity API response.
- *
- * @param data - Raw JSON response from Antigravity generateContent API.
- * @returns Structured SearchResult with synthesized text, web queries, and cited source URLs.
- */
+/** Read candidates from either the wrapped Antigravity or direct Gemini response. */
 function candidateList(data: unknown): unknown {
   if (!isRecord(data)) return undefined;
   if (isRecord(data.response)) return data.response.candidates;
   return data.candidates;
 }
 
+/** Return the first array entry without assuming its response shape. */
 function firstUnknownItem(value: unknown): unknown {
   if (!Array.isArray(value)) return undefined;
   return (value as unknown[])[0];
 }
 
+/**
+ * Parse visible candidate text and grounding metadata from an Antigravity response.
+ * Preserve original part and source indices so UTF-8 citation offsets remain usable.
+ *
+ * @param data - Raw JSON response from Antigravity generateContent API.
+ * @returns Synthesized text, web queries, sources, and grounding supports.
+ */
 export function parseSearchResponse(data: unknown): SearchResult {
-  const result: SearchResult = { text: "", sources: [], queries: [] };
+  const result: SearchResult = { text: "", sources: [], queries: [], parts: [], supports: [] };
   if (!isRecord(data)) return result;
 
   const responseObj = isRecord(data.response) ? data.response : data;
@@ -203,11 +219,12 @@ export function parseSearchResponse(data: unknown): SearchResult {
   // Extract synthesized text (ignoring thinking parts)
   const content = isRecord(candidate.content) ? candidate.content : undefined;
   if (Array.isArray(content?.parts)) {
-    result.text = content.parts
-      .filter((p) => isRecord(p) && !p.thought && typeof p.text === "string")
-      .map((p) => (p as { text: string }).text)
-      .filter(Boolean)
-      .join("\n\n");
+    result.parts = content.parts.flatMap((part, index) =>
+      isRecord(part) && !part.thought && typeof part.text === "string" && part.text
+        ? [{ index, text: part.text }]
+        : [],
+    );
+    result.text = result.parts.map((part) => part.text).join("\n\n");
   }
 
   // Extract grounding citations & executed queries
@@ -217,20 +234,95 @@ export function parseSearchResponse(data: unknown): SearchResult {
       result.queries = grounding.webSearchQueries.filter((q): q is string => typeof q === "string");
     }
     if (Array.isArray(grounding.groundingChunks)) {
-      for (const chunk of grounding.groundingChunks) {
+      for (const [index, chunk] of grounding.groundingChunks.entries()) {
         if (!isRecord(chunk)) continue;
         const web = isRecord(chunk.web) ? chunk.web : undefined;
         if (typeof web?.uri === "string") {
           result.sources.push({
+            index,
             title: typeof web.title === "string" && web.title.trim() ? web.title.trim() : web.uri,
             url: web.uri,
           });
         }
       }
     }
+    if (Array.isArray(grounding.groundingSupports)) {
+      const sourceIndices = new Set(result.sources.map((source) => source.index));
+      const textPartIndices = new Set(result.parts?.map((part) => part.index));
+      for (const support of grounding.groundingSupports) {
+        if (!isRecord(support) || !isRecord(support.segment)) continue;
+        if (
+          typeof support.segment.text !== "string" ||
+          !Array.isArray(support.groundingChunkIndices)
+        )
+          continue;
+        const partIndex = support.segment.partIndex ?? 0;
+        if (typeof partIndex !== "number" || !textPartIndices.has(partIndex)) continue;
+        const indices = support.groundingChunkIndices.filter(
+          (index): index is number =>
+            typeof index === "number" && Number.isInteger(index) && sourceIndices.has(index),
+        );
+        if (indices.length === 0) continue;
+        result.supports?.push({
+          text: support.segment.text,
+          startIndex:
+            typeof support.segment.startIndex === "number" ? support.segment.startIndex : undefined,
+          endIndex:
+            typeof support.segment.endIndex === "number" ? support.segment.endIndex : undefined,
+          partIndex:
+            typeof support.segment.partIndex === "number" ? support.segment.partIndex : undefined,
+          sourceIndices: indices,
+        });
+      }
+    }
   }
 
   return result;
+}
+
+/**
+ * Google's offsets are UTF-8 bytes within a content Part, not JS character indices.
+ * Verify each segment before inserting citations; skip unsafe mappings.
+ */
+function citeSearchText(res: SearchResult): string {
+  if (!res.supports?.length) return res.text;
+  const textParts = res.parts ?? [{ index: 0, text: res.text }];
+  // Respect callers editing result.text; original offsets no longer apply.
+  if (textParts.map((part) => part.text).join("\n\n") !== res.text) {
+    return res.text;
+  }
+  const sourceIndices = new Set(res.sources.map((source, index) => source.index ?? index));
+  const parts = textParts.map((part) => {
+    const bytes = Buffer.from(part.text, "utf8");
+    const insertions = new Map<number, Set<number>>();
+    for (const support of res.supports ?? []) {
+      const start = support.startIndex ?? 0;
+      const end = support.endIndex;
+      if (
+        (support.partIndex ?? 0) !== part.index ||
+        !Number.isInteger(start) ||
+        start < 0 ||
+        end === undefined ||
+        !Number.isInteger(end) ||
+        end <= start ||
+        end > bytes.length ||
+        bytes.subarray(start, end).toString("utf8") !== support.text
+      )
+        continue;
+      const indices = insertions.get(end) ?? new Set<number>();
+      for (const index of support.sourceIndices) {
+        if (Number.isInteger(index) && index >= 0 && sourceIndices.has(index)) indices.add(index);
+      }
+      insertions.set(end, indices);
+    }
+    let cited = bytes;
+    for (const [end, indices] of [...insertions].sort(([a], [b]) => b - a)) {
+      const references = [...indices].map((index) => `[${index + 1}]`).join("");
+      cited = Buffer.concat([cited.subarray(0, end), Buffer.from(references), cited.subarray(end)]);
+    }
+    return cited.toString("utf8");
+  });
+  return parts.join("\n\n") || res.text;
 }
 
 /**
@@ -242,12 +334,16 @@ export function parseSearchResponse(data: unknown): SearchResult {
 export function formatSearchResult(res: SearchResult): string {
   const sections: string[] = [];
 
-  if (res.text) {
-    sections.push(res.text);
-  }
+  const cited = citeSearchText(res);
+  if (cited) sections.push(cited);
 
   if (res.sources.length > 0) {
-    const list = res.sources.map((s) => `- [${s.title}](${s.url})`).join("\n");
+    const list = res.sources
+      .map(
+        (s, index) =>
+          `- ${res.supports?.length ? `[${(s.index ?? index) + 1}] ` : ""}[${s.title}](${s.url})`,
+      )
+      .join("\n");
     sections.push(`### Sources\n${list}`);
   }
 
