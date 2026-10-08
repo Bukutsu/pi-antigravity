@@ -80,6 +80,7 @@ The provider uses the OAuth 2.0 Authorization Code flow with PKCE, so credential
 2. After you approve access, Pi exchanges the callback code for tokens and stores the provider credentials in Pi's auth store (normally `~/.pi/agent/auth.json`).
 3. Pi refreshes access tokens automatically when they expire — you shouldn't need to sign in again unless a token is revoked.
 4. Successful logins and token rotations are also kept in `~/.pi/agent/antigravity-accounts.json` with owner-only permissions so linked accounts can be switched without re-authenticating.
+5. Access is quota-backed by the signed-in Google account rather than billed per token, so Pi marks Antigravity models as subscription-backed (`(sub)` in the footer); any cost Pi shows for them is a catalog estimate.
 
 The callback listener binds only to a loopback host, so it isn't reachable from outside your machine. The auth and account files it writes to contain sensitive access and refresh tokens: **do not commit them, paste them into issues, or share their contents.**
 

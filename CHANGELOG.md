@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Subscription marker:** The OAuth registration now sets `isSubscription`, so Pi classifies Antigravity models as subscription-backed (footer `(sub)` marker) instead of metered.
+
 ## [0.9.0] - 2026-09-30
 
 ### Added

@@ -130,6 +130,9 @@ export default function (pi: ExtensionAPI): void {
     refreshModels: refreshAntigravityModels,
     oauth: {
       name: PROVIDER_NAME,
+      // Antigravity access is quota-backed by the Google account, not metered per token.
+      // Pi uses this for the footer's (sub) marker and subscription-aware cost display.
+      isSubscription: true,
       login: loginAndRemember,
       refreshToken: refreshAndRemember,
       getApiKey,
