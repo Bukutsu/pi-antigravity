@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
@@ -9,9 +10,9 @@ import {
 import { AntigravityRequestType, AntigravityUserAgent, GeminiRole } from "../types/enums.js";
 import { antigravityFetch } from "../utils/http.js";
 import { safeError } from "../utils/security.js";
-import { antigravityRequestEnvelope, sanitizeText } from "../utils/util.js";
+import { sanitizeText } from "../utils/util.js";
 
-export const DEFAULT_IMAGE_MODEL = "gemini-3-pro-image";
+export const DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image";
 export const IMAGE_ASPECT_RATIOS = [
   "1:1",
   "2:3",
@@ -28,11 +29,9 @@ export type ImageAspectRatio = (typeof IMAGE_ASPECT_RATIOS)[number];
 
 const IMAGE_MODEL_FALLBACKS = [
   DEFAULT_IMAGE_MODEL,
-  "gemini-3.1-flash-image",
+  "gemini-3-pro-image",
   "gemini-3-pro-image-preview",
 ];
-const IMAGE_SYSTEM_INSTRUCTION =
-  "You are an AI image generator. Generate images based on user descriptions. Focus on creating high-quality, visually appealing images that match the user's request.";
 const DEFAULT_IMAGE_DIR = join(".pi", "generated-images");
 const MAX_PROMPT_CHARS = 8000;
 
@@ -43,13 +42,12 @@ export type ImageGenerateRequest = {
   model: string;
   request: {
     contents: Array<{ role: "user"; parts: Array<{ text: string }> }>;
-    systemInstruction: { role: "user"; parts: Array<{ text: string }> };
     generationConfig: {
       imageConfig: { aspectRatio: string };
       candidateCount: number;
     };
   };
-  requestType: "agent";
+  requestType: "image_gen";
   userAgent: "antigravity";
   requestId: string;
 };
@@ -178,24 +176,19 @@ export function buildImageGenerateRequest(
   projectId: string,
   aspectRatio: string,
 ): ImageGenerateRequest {
-  const envelope = antigravityRequestEnvelope(model, false);
   return {
     project: projectId,
     model,
     request: {
       contents: [{ role: GeminiRole.User, parts: [{ text: sanitizeText(prompt) }] }],
-      systemInstruction: {
-        role: GeminiRole.User,
-        parts: [{ text: IMAGE_SYSTEM_INSTRUCTION }],
-      },
       generationConfig: {
         imageConfig: { aspectRatio },
         candidateCount: 1,
       },
     },
-    requestType: AntigravityRequestType.Agent,
+    requestType: AntigravityRequestType.ImageGen,
     userAgent: AntigravityUserAgent.Antigravity,
-    requestId: envelope.requestId,
+    requestId: `image_gen/${Date.now()}/${randomUUID()}/1`,
   };
 }
 
@@ -257,6 +250,35 @@ export async function collectImagesFromSse(
   return { images, text };
 }
 
+/** Uses the direct image endpoint; only a 404 enables the legacy SSE endpoint. */
+export async function requestImageResponse(
+  endpoint: string,
+  init: RequestInit,
+  fetcher: (url: string, init: RequestInit) => Promise<Response> = antigravityFetch,
+): Promise<{ response: Response; streaming: boolean }> {
+  const response = await fetcher(`${endpoint}/v1internal:generateContent`, init);
+  if (response.status !== 404) return { response, streaming: false };
+  await response.text();
+  return {
+    response: await fetcher(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, init),
+    streaming: true,
+  };
+}
+
+/** Extracts images and notes from wrapped or unwrapped direct responses. */
+export function parseImageResponse(chunk: ImageStreamChunk): {
+  images: GeneratedImage[];
+  text: string[];
+} {
+  if (chunk.error?.message) throw new Error(chunk.error.message);
+  const images: GeneratedImage[] = [];
+  const text: string[] = [];
+  for (const candidate of (chunk.response || chunk).candidates || []) {
+    collectImagesFromParts(candidate.content?.parts, images, text);
+  }
+  return { images, text };
+}
+
 async function writeImage(filePath: string, image: GeneratedImage): Promise<string> {
   await mkdir(dirname(filePath), { recursive: true });
   await writeFile(filePath, Buffer.from(image.data, "base64"));
@@ -285,15 +307,12 @@ export async function generateAntigravityImage(
     for (const endpoint of endpointCandidates()) {
       if (options.signal?.aborted) throw new Error("Request was aborted");
       try {
-        const response = await antigravityFetch(
-          `${endpoint}/v1internal:streamGenerateContent?alt=sse`,
-          {
-            method: "POST",
-            headers,
-            body,
-            signal: options.signal,
-          },
-        );
+        const { response, streaming } = await requestImageResponse(endpoint, {
+          method: "POST",
+          headers,
+          body,
+          signal: options.signal,
+        });
         if (!response.ok) {
           lastError = jsonOrTextError(await response.text()).slice(0, 400);
           if (response.status === 404 || [403, 429, 500, 502, 503, 504].includes(response.status)) {
@@ -303,7 +322,9 @@ export async function generateAntigravityImage(
             `Antigravity image request failed (${response.status}): ${safeError(lastError)}`,
           );
         }
-        const parsed = await collectImagesFromSse(response, options.signal);
+        const parsed = streaming
+          ? await collectImagesFromSse(response, options.signal)
+          : parseImageResponse((await response.json()) as ImageStreamChunk);
         if (!parsed.images.length) {
           lastError = parsed.text.join(" ").trim() || "No image data returned.";
           continue;

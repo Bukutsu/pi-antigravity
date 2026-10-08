@@ -1,7 +1,11 @@
+import { deepStrictEqual, rejects } from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DEFAULT_IMAGE_MODEL,
+  requestImageResponse,
+  parseImageResponse,
   assertSafeAspectRatio,
   assertSafeImageModel,
   buildImageGenerateRequest,
@@ -77,7 +81,44 @@ async function main() {
   assert(req.project === "proj-1", "request project");
   assert(req.request.generationConfig.imageConfig.aspectRatio === "16:9", "aspect ratio");
   assert(req.request.contents[0]?.parts[0]?.text === "a lighthouse", "prompt text");
-  assert(/^agent\//.test(req.requestId), "agent request id");
+  assert(DEFAULT_IMAGE_MODEL === "gemini-3.1-flash-image", "default image model");
+  assert(req.requestType === "image_gen", "image request type");
+  assert(/^image_gen\/\d+\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/1$/.test(req.requestId), "image request id");
+  assert(!("systemInstruction" in req.request), "no image system instruction");
+
+  for (const status of [200, 400, 403, 429, 500, 503]) {
+    const calls: string[] = [];
+    const direct = new Response("note", { status });
+    const result = await requestImageResponse("https://example.test", {}, async (url) => {
+      calls.push(url);
+      return direct;
+    });
+    deepStrictEqual(calls, ["https://example.test/v1internal:generateContent"]);
+    assert(result.response === direct && !result.streaming, "no SSE retry except 404");
+  }
+  const missing = new Response("not found", { status: 404 });
+  const calls: string[] = [];
+  const streamed = await requestImageResponse("https://example.test", {}, async (url) => {
+    calls.push(url);
+    return calls.length === 1 ? missing : new Response("data: [DONE]\\n");
+  });
+  assert(missing.bodyUsed, "404 body consumed");
+  assert(streamed.streaming, "404 enables SSE");
+  deepStrictEqual(calls, [
+    "https://example.test/v1internal:generateContent",
+    "https://example.test/v1internal:streamGenerateContent?alt=sse",
+  ]);
+  await rejects(requestImageResponse("https://example.test", {}, async () => {
+    throw new Error("aborted");
+  }), /aborted/);
+  const candidate = { content: { parts: [
+    { text: "note" }, { inlineData: { mimeType: "image/jpeg", data: "AQID" } },
+  ] } };
+  const expected = { images: [{ mimeType: "image/jpeg", data: "AQID" }], text: ["note"] };
+  deepStrictEqual(parseImageResponse({ candidates: [candidate] }), expected);
+  deepStrictEqual(parseImageResponse({ response: { candidates: [candidate] } }), expected);
+  deepStrictEqual(parseImageResponse({ candidates: [{ content: { parts: [{ text: "no image" }] } }] }),
+    { images: [], text: ["no image"] });
 
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
   const body =
