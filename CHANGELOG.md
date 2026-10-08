@@ -4,9 +4,23 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Native image API:** Pi `generateImages` / codemode can call `gemini-3.1-flash-image` without saving files (#82).
+- **Per-feature toggles:** `pi config` can disable `src/features/google-search.ts` or `src/features/generate-image.ts` while keeping the provider and slash commands. Environment variables still force a loaded tool off (#79).
+
+### Changed
+
+- **Google Search default:** Interactive search uses `gemini-3.5-flash-lite` with a compact evidence brief and no default thinking budget. `--thinking` and `--model` still override it. Fallbacks are `gemini-3.1-flash-lite` and `gemini-3-flash` (#80).
+- **Image requests:** Default image model is `gemini-3.1-flash-image`, using the direct image endpoint and `image_gen` request type, with the legacy stream endpoint only on HTTP 404 (#81).
+
 ### Fixed
 
-- **Subscription marker:** The OAuth registration now sets `isSubscription`, so Pi classifies Antigravity models as subscription-backed (footer `(sub)` marker) instead of metered.
+- **Subscription marker:** The OAuth registration now sets `isSubscription`, so Pi classifies Antigravity models as subscription-backed (footer `(sub)` marker) instead of metered (#74).
+- **Search citations:** Inline Google Search citations use UTF-8 byte offsets and keep original source indexes (#78).
+- **Session IDs:** Explicit and fallback session IDs are stable signed-int64 values instead of a new random ID on every omitted-ID request (#76, #77).
+- **Mid-stream errors:** A trailing 500/503 body, or a stream that ends without `finishReason`, is reported as an error instead of a successful stop (#72).
+- **Account verification:** A 403 `VALIDATION_REQUIRED` response includes the `accounts.google.com` verification link. `/antigravity.doctor` still redacts that link (#73).
 
 ## [0.9.0] - 2026-09-30
 

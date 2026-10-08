@@ -50,7 +50,7 @@ import {
   getThinkingConfig,
   PROVIDER_ID,
 } from "../models/models.js";
-import { redactSecrets, safeError } from "../utils/security.js";
+import { extractValidationUrl, redactSecrets, safeError } from "../utils/security.js";
 import {
   ANTIGRAVITY_API,
   type ActiveBlock,
@@ -1021,10 +1021,14 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
     return "Antigravity authentication failed. Next: run /login antigravity, then retry.";
   }
   if (status === 403) {
-    if (/permission|forbidden|access/i.test(msg)) {
+    const verifyUrl = extractValidationUrl(text);
+    const verifyHint = verifyUrl
+      ? ` Open this link in a browser signed in to the same Google account to verify: ${verifyUrl}`
+      : "";
+    if (/permission|forbidden|access/i.test(msg) && !verifyUrl) {
       return "Antigravity access was denied for this account or project. Next: try another model, re-login, or use an account with access.";
     }
-    return `Antigravity denied this request. Next: re-login or try another model. Backend said: ${msg}`;
+    return `Antigravity denied this request. Next: re-login or try another model. Backend said: ${msg}${verifyHint}`;
   }
   if (status === 404) {
     if (/Requested entity was not found/i.test(msg)) {
@@ -1261,8 +1265,148 @@ export async function streamResponse(
   let started = false;
   let currentBlock: ActiveBlock | null = null;
   let hasContent = false;
+  let sawFinishReason = false;
+  let stray = "";
   const blocks = output.content;
   const blockIndex = () => blocks.length - 1;
+
+  const consumeStray = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith(":")) return;
+    stray = stray ? `${stray}\n${trimmed}` : trimmed;
+    const start = stray.indexOf("{");
+    if (start < 0) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stray.slice(start));
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed !== "object" || !("error" in parsed)) return;
+    const record = parsed as { error?: { code?: unknown; message?: unknown } };
+    const status = typeof record.error?.code === "number" ? record.error.code : undefined;
+    if (status !== undefined) setLastStatus(status);
+    const friendly = friendlyAntigravityError(status, stray.slice(start));
+    throw new Error(status ? `${friendly} (${status})` : friendly);
+  };
+
+  const handleLine = (line: string) => {
+    if (!line.startsWith("data:")) {
+      consumeStray(line);
+      return;
+    }
+    const json = line.slice(5).trim();
+    if (!json || json === "[DONE]") return;
+
+    let chunk: StreamChunk;
+    try {
+      chunk = JSON.parse(json) as StreamChunk;
+    } catch {
+      return;
+    }
+
+    if (chunk.error) {
+      const status = typeof chunk.error.code === "number" ? chunk.error.code : undefined;
+      if (status !== undefined) setLastStatus(status);
+      const friendly = friendlyAntigravityError(status, JSON.stringify({ error: chunk.error }));
+      throw new Error(status ? `${friendly} (${status})` : chunk.error.message || friendly);
+    }
+
+    const responseData = chunk.response || chunk;
+    const candidate = responseData.candidates?.[0];
+
+    for (const part of candidate?.content?.parts || []) {
+      if (part.text !== undefined) {
+        hasContent = true;
+        const isThinking = part.thought === true;
+        const type = isThinking ? "thinking" : "text";
+        if (!currentBlock || currentBlock.type !== type) {
+          finishCurrent();
+          currentBlock = isThinking
+            ? { type: "thinking", thinking: "", thinkingSignature: undefined }
+            : { type: "text", text: "" };
+          blocks.push(currentBlock);
+          ensureStarted();
+          stream.push({
+            type: isThinking ? "thinking_start" : "text_start",
+            contentIndex: blockIndex(),
+            partial: output,
+          });
+        }
+        if (isThinking && currentBlock.type === "thinking") {
+          currentBlock.thinking += part.text;
+          if (part.thoughtSignature) currentBlock.thinkingSignature = part.thoughtSignature;
+          stream.push({
+            type: "thinking_delta",
+            contentIndex: blockIndex(),
+            delta: part.text,
+            partial: output,
+          });
+        } else if (!isThinking && currentBlock.type === "text") {
+          currentBlock.text += part.text;
+          if (part.thoughtSignature) currentBlock.textSignature = part.thoughtSignature;
+          stream.push({
+            type: "text_delta",
+            contentIndex: blockIndex(),
+            delta: part.text,
+            partial: output,
+          });
+        }
+      }
+
+      if (part.functionCall) {
+        hasContent = true;
+        finishCurrent();
+        const rawId = part.functionCall.id || "";
+        const toolCall: ToolCall = {
+          type: "toolCall",
+          id: sanitizeToolCallId(rawId, part.functionCall.name),
+          name: part.functionCall.name || "",
+          arguments: asToolCallArguments(part.functionCall.args),
+          ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
+        };
+        blocks.push(toolCall);
+        ensureStarted();
+        stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
+        stream.push({
+          type: "toolcall_delta",
+          contentIndex: blockIndex(),
+          delta: JSON.stringify(toolCall.arguments),
+          partial: output,
+        });
+        stream.push({
+          type: "toolcall_end",
+          contentIndex: blockIndex(),
+          toolCall,
+          partial: output,
+        });
+      }
+    }
+
+    if (candidate?.finishReason) {
+      sawFinishReason = true;
+      output.rawStopReason = candidate.finishReason;
+      output.stopReason = blocks.some((b) => b.type === "toolCall")
+        ? StopReason.ToolUse
+        : mapStopReason(candidate.finishReason);
+    }
+
+    if (responseData.usageMetadata) {
+      const prompt = responseData.usageMetadata.promptTokenCount || 0;
+      const cacheRead = responseData.usageMetadata.cachedContentTokenCount || 0;
+      const thoughts = responseData.usageMetadata.thoughtsTokenCount || 0;
+      output.usage.input = prompt - cacheRead;
+      output.usage.output = (responseData.usageMetadata.candidatesTokenCount || 0) + thoughts;
+      output.usage.reasoning = thoughts;
+      output.usage.cacheRead = cacheRead;
+      output.usage.totalTokens = responseData.usageMetadata.totalTokenCount || 0;
+      if (model?.cost) {
+        calculateCost(model, output.usage);
+      } else {
+        output.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+      }
+    }
+  };
 
   const ensureStarted = () => {
     if (!started) {
@@ -1301,120 +1445,21 @@ export async function streamResponse(
     while ((newlineIdx = buffer.indexOf("\n", scanStart)) !== -1) {
       const line = buffer.slice(scanStart, newlineIdx);
       scanStart = newlineIdx + 1;
-      if (!line.startsWith("data:")) continue;
-      const json = line.slice(5).trim();
-      if (!json || json === "[DONE]") continue;
-
-      let chunk: StreamChunk;
-      try {
-        chunk = JSON.parse(json) as StreamChunk;
-      } catch {
-        continue;
-      }
-
-      if (chunk.error) {
-        throw new Error(chunk.error.message || JSON.stringify(chunk.error));
-      }
-
-      const responseData = chunk.response || chunk;
-      const candidate = responseData.candidates?.[0];
-
-      for (const part of candidate?.content?.parts || []) {
-        if (part.text !== undefined) {
-          hasContent = true;
-          const isThinking = part.thought === true;
-          const type = isThinking ? "thinking" : "text";
-          if (!currentBlock || currentBlock.type !== type) {
-            finishCurrent();
-            currentBlock = isThinking
-              ? { type: "thinking", thinking: "", thinkingSignature: undefined }
-              : { type: "text", text: "" };
-            blocks.push(currentBlock);
-            ensureStarted();
-            stream.push({
-              type: isThinking ? "thinking_start" : "text_start",
-              contentIndex: blockIndex(),
-              partial: output,
-            });
-          }
-          if (isThinking && currentBlock.type === "thinking") {
-            currentBlock.thinking += part.text;
-            if (part.thoughtSignature) currentBlock.thinkingSignature = part.thoughtSignature;
-            stream.push({
-              type: "thinking_delta",
-              contentIndex: blockIndex(),
-              delta: part.text,
-              partial: output,
-            });
-          } else if (!isThinking && currentBlock.type === "text") {
-            currentBlock.text += part.text;
-            if (part.thoughtSignature) currentBlock.textSignature = part.thoughtSignature;
-            stream.push({
-              type: "text_delta",
-              contentIndex: blockIndex(),
-              delta: part.text,
-              partial: output,
-            });
-          }
-        }
-
-        if (part.functionCall) {
-          hasContent = true;
-          finishCurrent();
-          const rawId = part.functionCall.id || "";
-          const toolCall: ToolCall = {
-            type: "toolCall",
-            id: sanitizeToolCallId(rawId, part.functionCall.name),
-            name: part.functionCall.name || "",
-            arguments: asToolCallArguments(part.functionCall.args),
-            ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
-          };
-          blocks.push(toolCall);
-          ensureStarted();
-          stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
-          stream.push({
-            type: "toolcall_delta",
-            contentIndex: blockIndex(),
-            delta: JSON.stringify(toolCall.arguments),
-            partial: output,
-          });
-          stream.push({
-            type: "toolcall_end",
-            contentIndex: blockIndex(),
-            toolCall,
-            partial: output,
-          });
-        }
-      }
-
-      if (candidate?.finishReason) {
-        output.rawStopReason = candidate.finishReason;
-        output.stopReason = blocks.some((b) => b.type === "toolCall")
-          ? StopReason.ToolUse
-          : mapStopReason(candidate.finishReason);
-      }
-
-      if (responseData.usageMetadata) {
-        const prompt = responseData.usageMetadata.promptTokenCount || 0;
-        const cacheRead = responseData.usageMetadata.cachedContentTokenCount || 0;
-        const thoughts = responseData.usageMetadata.thoughtsTokenCount || 0;
-        output.usage.input = prompt - cacheRead;
-        output.usage.output = (responseData.usageMetadata.candidatesTokenCount || 0) + thoughts;
-        output.usage.reasoning = thoughts;
-        output.usage.cacheRead = cacheRead;
-        output.usage.totalTokens = responseData.usageMetadata.totalTokenCount || 0;
-        if (model?.cost) {
-          calculateCost(model, output.usage);
-        } else {
-          output.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-        }
-      }
+      handleLine(line.replace(/\r$/, ""));
     }
 
     if (scanStart > 0) {
       buffer = buffer.slice(scanStart);
       scanStart = 0;
     }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.length > 0) handleLine(buffer.replace(/\r$/, ""));
+  if (!sawFinishReason) {
+    throw new Error(
+      "Antigravity stream ended without a finish reason; the response was terminated before completion.",
+    );
   }
 
   finishCurrent();

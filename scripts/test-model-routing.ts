@@ -12,7 +12,7 @@ import {
   defaultUserAgent,
   stableProjectId,
 } from "../src/client/index.js";
-import { getLastDiagnostics, resetDiagnosticsForTests } from "../src/diagnostics/index.js";
+import { getLastDiagnostics, resetDiagnosticsForTests, setLastError } from "../src/diagnostics/index.js";
 import { GeminiToolCallingMode, StopReason, ToolChoice } from "../src/types/enums.js";
 import {
   ANTIGRAVITY_MODELS,
@@ -591,6 +591,41 @@ assert.equal(mapStopReason("OTHER"), StopReason.Error);
 assert.equal(mapStopReason(undefined), StopReason.Stop);
 
 assert.match(friendlyAntigravityError(401, "nope"), /authentication failed/i);
+const validationBody = JSON.stringify({
+  error: {
+    code: 403,
+    message: "Verify your account to continue.",
+    details: [
+      {
+        metadata: {
+          validation_url:
+            "https://accounts.google.com/signin/continue?plt=session-secret&flowName=GlifWebSignIn",
+        },
+      },
+    ],
+  },
+});
+const validationError = friendlyAntigravityError(403, validationBody);
+assert.match(validationError, /accounts\.google\.com\/signin\/continue/);
+assert.match(validationError, /plt=session-secret/);
+setLastError(validationError);
+assert.equal(/plt=session-secret/.test(getLastDiagnostics().error || ""), false);
+assert.match(getLastDiagnostics().error || "", /Verify your account/);
+resetDiagnosticsForTests();
+const rejectedValidationUrl = friendlyAntigravityError(
+  403,
+  JSON.stringify({
+    error: {
+      message: "denied",
+      details: [{ metadata: { validation_url: "https://evil.example/phish" } }],
+    },
+  }),
+);
+assert.equal(/evil\.example/.test(rejectedValidationUrl), false, "reject non-Google validation URLs");
+assert.match(
+  friendlyAntigravityError(403, JSON.stringify({ error: { message: "permission denied" } })),
+  /access was denied/i,
+);
 assert.match(
   friendlyAntigravityError(429, "Individual quota reached. Resets in 1h"),
   /Quota reached/,

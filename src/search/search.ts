@@ -9,24 +9,27 @@ import { antigravityFetch } from "../utils/http.js";
 import { safeError } from "../utils/security.js";
 import { antigravityRequestEnvelope, isRecord } from "../utils/util.js";
 
-/** Default search engine model: fast, natively supports groundings and reasoning. */
-export const DEFAULT_SEARCH_MODEL = "gemini-3-flash";
+/** Default search model: fast grounding model for interactive tool calls. */
+export const DEFAULT_SEARCH_MODEL = "gemini-3.5-flash-lite";
 
-/** Fallback runtime candidates if the primary flash model is undergoing rollout or capacity limits. */
+/** Fallback runtime candidates if the primary model is missing or out of capacity. */
 export const SEARCH_MODEL_FALLBACKS = [
   DEFAULT_SEARCH_MODEL,
-  "gemini-3.6-flash-low",
-  "gemini-2.5-flash",
+  "gemini-3.1-flash-lite",
+  "gemini-3-flash",
 ] as const;
 
-export const SEARCH_SYSTEM_INSTRUCTION = `You are an expert deep-research investigator and technical analyst.
-Your objective is to use Google Search Grounding to unearth rich, high-signal, multi-perspective facts.
+export const SEARCH_SYSTEM_INSTRUCTION = `You are a careful research assistant using Google Search grounding.
+Return a compact evidence brief with exactly these sections:
+## Findings
+## Gaps
+## Next checks
 
-Guidelines:
-1. DO NOT settle for generic marketing summaries, public relations announcements, or shallow overviews.
-2. Formulate multiple distinct, targeted search queries covering technical architecture, specific parameters, benchmark comparisons, developer issues, pitfalls, and community feedback.
-3. Prioritize hard technical details: exact version numbers, hardware requirements, protocol constraints, benchmarks, error codes, and configuration snippets.
-4. Structure your response into clean, logical Markdown sections citing direct sources.`;
+Rules:
+- Verify each claim inside the specific item, function, or section it refers to. Do not copy an attribute from a neighboring entry on the same page.
+- Prefer primary documentation and exact names, versions, and constraints over marketing summaries.
+- If a fact is not supported by a retrieved source, put it under Gaps instead of stating it as a finding.
+- Keep the brief short enough for an interactive agent tool call.`;
 
 export type SearchSource = {
   /** Original groundingChunks index, including gaps from skipped non-web chunks. */
@@ -140,8 +143,8 @@ export function buildSearchRequest(
     tools.push({ urlContext: {} });
   }
 
-  // Thinking budget: 4096 if explicitly requested, baseline 2048 to trigger multi-step search planning
-  const thinkingBudget = options.thinking ? 4096 : 2048;
+  // Default budget stays at 0 so interactive lookups stay fast. --thinking opts into planning.
+  const thinkingBudget = options.thinking ? 4096 : 0;
   const envelope = antigravityRequestEnvelope(model, false);
 
   return {

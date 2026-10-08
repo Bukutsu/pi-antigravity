@@ -6,6 +6,8 @@ import {
   parseSearchCommandArgs,
   parseSearchResponse,
   DEFAULT_SEARCH_MODEL,
+  SEARCH_MODEL_FALLBACKS,
+  SEARCH_SYSTEM_INSTRUCTION,
 } from "../src/search/index.js";
 
 function fail(message: string): never {
@@ -44,6 +46,21 @@ async function main() {
 
   assert(req.project === "test-project-123", "projectId set");
   assert(req.model === DEFAULT_SEARCH_MODEL, "model matches default");
+  assert(DEFAULT_SEARCH_MODEL === "gemini-3.5-flash-lite", "default search model is flash lite");
+  assert(
+    SEARCH_MODEL_FALLBACKS.join(",") === "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3-flash",
+    "search fallbacks",
+  );
+  assert(SEARCH_SYSTEM_INSTRUCTION.includes("## Findings"), "evidence brief findings");
+  assert(SEARCH_SYSTEM_INSTRUCTION.includes("## Gaps"), "evidence brief gaps");
+  assert(SEARCH_SYSTEM_INSTRUCTION.includes("## Next checks"), "evidence brief next checks");
+  assert(SEARCH_SYSTEM_INSTRUCTION.includes("neighboring entry"), "attribute bleed rule");
+  const fast = buildSearchRequest({ query: "clock.monotonic" }, DEFAULT_SEARCH_MODEL, "proj");
+  assert(
+    (fast.request as { generationConfig?: { thinkingConfig?: { thinkingBudget?: number } } })
+      .generationConfig?.thinkingConfig?.thinkingBudget === 0,
+    "default search thinking budget is off",
+  );
   assert(req.requestType === "agent", "requestType set to agent");
   assert(req.userAgent === "antigravity", "userAgent set to antigravity");
   assert(typeof req.requestId === "string" && req.requestId.length > 0, "requestId envelope generated");

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import registerImage from "../src/features/generate-image.js";
+import registerSearch from "../src/features/google-search.js";
 import register from "../src/index.js";
 
 const TOGGLES = ["NO_EXTRA_TOOLS", "NO_SEARCH_TOOL", "NO_IMAGE_TOOL"];
@@ -25,7 +27,10 @@ function registeredTools(env: Record<string, string>): { tools: string[]; comman
     },
   );
   try {
-    register(pi as Parameters<typeof register>[0]);
+    const api = pi as Parameters<typeof register>[0];
+    register(api);
+    registerSearch(api);
+    registerImage(api);
   } finally {
     for (const [key, value] of saved) {
       if (value === undefined) delete process.env[key];

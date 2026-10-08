@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import registerImage from "../src/features/generate-image.js";
+import registerSearch from "../src/features/google-search.js";
 import register from "../src/index.js";
 import { ANTIGRAVITY_IMAGE_API, ANTIGRAVITY_IMAGE_MODELS, generateAntigravityImages } from "../src/image/native.js";
 
@@ -12,7 +14,7 @@ assert.equal((await generateAntigravityImages(model, context, { signal: abort.si
 
 let provider: any;
 const schemas: Record<string, string[]> = {};
-register(new Proxy({}, {
+const pi = new Proxy({}, {
   get(_target, key) {
     if (key === "registerProvider") return (_name: string, config: unknown) => { provider = config; };
     if (key === "registerTool") return (tool: any) => {
@@ -20,7 +22,10 @@ register(new Proxy({}, {
     };
     return () => undefined;
   },
-}) as Parameters<typeof register>[0]);
+}) as Parameters<typeof register>[0];
+register(pi);
+registerSearch(pi);
+registerImage(pi);
 assert.equal(provider.images[ANTIGRAVITY_IMAGE_API].generateImages, generateAntigravityImages);
 assert.equal(provider.models.filter((m: any) => m.type === "image").length, 1);
 assert.deepEqual(schemas.generate_image, ["aspectRatio", "model", "path", "prompt"]);

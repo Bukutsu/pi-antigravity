@@ -3,6 +3,7 @@
  * per line, so the parser must stay correct for every possible chunk boundary,
  * including boundaries that split a single `data:` line.
  */
+import { rejects } from "node:assert/strict";
 import { createAssistantMessageEventStream, type Api, type Model } from "@earendil-works/pi-ai";
 import { streamResponse } from "../src/stream/stream.js";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
@@ -158,6 +159,19 @@ async function main() {
   const noCostRun = await run([BODY], noCostModel);
   assert(noCostRun.output.usage.cost.total === 0, "omitted cost defaults total to 0");
   assert(noCostRun.output.usage.cost.input === 0, "omitted cost defaults input to 0");
+
+  const midStream = `${sse({
+    response: {
+      candidates: [{ content: { parts: [{ thought: true, text: "planning" }] } }],
+      usageMetadata: { promptTokenCount: 10, totalTokenCount: 10 },
+    },
+  })}\n{\n  "error": {\n    "code": 503,\n    "message": "No capacity available for model gemini-3.8-flash-medium on the server",\n    "status": "UNAVAILABLE"\n  }\n}\n`;
+  await rejects(run([midStream]), /no capacity|503/i);
+
+  const unfinished = sse({
+    response: { candidates: [{ content: { parts: [{ text: "cut off" }] } }] },
+  });
+  await rejects(run([unfinished]), /terminated before completion/);
 
   console.log(`stream SSE: ${sizes.length} chunk-boundary cases passed`);
 }
