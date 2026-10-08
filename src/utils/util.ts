@@ -69,18 +69,41 @@ export type AntigravityEnvelopeOptions = {
   userTurnIndex?: number;
   trajectoryId?: string;
   conversationId?: string;
+  sessionId?: string;
   lastExecutionId?: string;
 };
 
-const sessionTrajectoryMap = new Map<string, { conversationId: string; trajectoryId: string }>();
+/** Signed int64 session ID: deterministic for nonempty seeds, random otherwise. */
+export function toInt64SessionId(seed?: string): string {
+  if (seed?.trim()) {
+    const s = seed.trim();
+    if (/^-?\d+$/.test(s)) {
+      const value = BigInt(s);
+      if (value >= -(1n << 63n) && value <= (1n << 63n) - 1n) return s;
+    }
+    const hash = createHash("sha256").update(`antigravity:session:${s}`).digest();
+    return String(new DataView(hash.buffer, hash.byteOffset, 8).getBigInt64(0, true));
+  }
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return String(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true));
+}
 
-/** Stable conversationId and trajectoryId within a multi-turn conversation session. */
+const sessionTrajectoryMap = new Map<
+  string,
+  { conversationId: string; trajectoryId: string; sessionId: string }
+>();
+
+/**
+ * Resolve deterministic IDs from an explicit session ID or the first message's seed.
+ * The fallback uses role, timestamp, and a 64-character content prefix: separate or
+ * forked histories can alias, and compaction can change the seed. No cache behavior is guaranteed.
+ */
 export function resolveSessionTrajectory(
   context?: {
     messages?: Array<{ role?: string; timestamp?: number; content?: unknown }>;
   },
   sessionId?: string,
-): { conversationId: string; trajectoryId: string } {
+): { conversationId: string; trajectoryId: string; sessionId: string } {
   if (sessionId?.trim()) {
     const seed = `session:${sessionId.trim()}`;
     let entry = sessionTrajectoryMap.get(seed);
@@ -88,6 +111,7 @@ export function resolveSessionTrajectory(
       entry = {
         conversationId: stableUuid(`antigravity:conv:${seed}`),
         trajectoryId: stableUuid(`antigravity:traj:${seed}`),
+        sessionId: toInt64SessionId(sessionId),
       };
       sessionTrajectoryMap.set(seed, entry);
       if (sessionTrajectoryMap.size > 64) {
@@ -100,7 +124,11 @@ export function resolveSessionTrajectory(
 
   const firstMsg = context?.messages?.[0];
   if (!firstMsg) {
-    return { conversationId: crypto.randomUUID(), trajectoryId: crypto.randomUUID() };
+    return {
+      conversationId: crypto.randomUUID(),
+      trajectoryId: crypto.randomUUID(),
+      sessionId: toInt64SessionId(),
+    };
   }
   const contentSeed =
     typeof firstMsg.content === "string"
@@ -114,6 +142,7 @@ export function resolveSessionTrajectory(
     entry = {
       conversationId: stableUuid(`antigravity:conv:${seed}`),
       trajectoryId: stableUuid(`antigravity:traj:${seed}`),
+      sessionId: toInt64SessionId(seed),
     };
     sessionTrajectoryMap.set(seed, entry);
     if (sessionTrajectoryMap.size > 64) {
@@ -128,6 +157,10 @@ export function clearSessionTrajectoryMap(): void {
   sessionTrajectoryMap.clear();
 }
 
+/**
+ * Build request metadata and model labels from legacy Claude flags or envelope options.
+ * Supplied IDs are forwarded; absent IDs are generated. Execution labels appear after step 1.
+ */
 export function antigravityRequestEnvelope(
   wireModelId: string,
   optionsOrIsClaude: boolean | AntigravityEnvelopeOptions = false,
@@ -142,8 +175,7 @@ export function antigravityRequestEnvelope(
   const requestIndex = options.requestIndex ?? options.userTurnIndex ?? Math.max(0, step - 1);
   const agentId = options.conversationId || crypto.randomUUID();
   const trajectoryId = options.trajectoryId || crypto.randomUUID();
-  const bytes = crypto.getRandomValues(new Uint8Array(8));
-  const sessionId = String(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true));
+  const sessionId = options.sessionId || toInt64SessionId();
 
   const claudeLabel = isClaude ? "true" : "false";
   const nonGeminiLabel = isNonGemini ? "true" : "false";
