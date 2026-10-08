@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-08
+
 ### Added
 
 - **Native image API:** Pi `generateImages` / codemode can call `gemini-3.1-flash-image` without saving files (#82).
