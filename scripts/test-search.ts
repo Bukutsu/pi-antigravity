@@ -18,6 +18,7 @@ function assert(condition: unknown, message: string): void {
   if (!condition) fail(`FAILED: ${message}`);
 }
 
+/** Verify search request construction, parsing, and citation behavior. */
 async function main() {
   // 1. parseSearchCommandArgs
   const simple = parseSearchCommandArgs("mimo 2.6 release date");
