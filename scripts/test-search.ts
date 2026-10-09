@@ -175,10 +175,44 @@ async function main() {
   });
   strictAssert.deepEqual(grounded.parts?.map(part => part.index), [0, 2]);
   strictAssert.deepEqual(grounded.sources.map(source => source.index), [0, 2]);
+
+  // Lite responses can place the visible answer after thought parts while omitting
+  // groundingSupports.segment.partIndex. Map those supports to the sole visible part.
+  const answer = "Paris is the capital of France.";
+  const liteResponse = parseSearchResponse({
+    candidates: [{
+      content: { parts: [
+        { thought: true, text: "Searching..." },
+        { thought: true, text: "Checking sources..." },
+        { text: answer },
+      ] },
+      groundingMetadata: {
+        groundingChunks: [{ web: { uri: "https://example.com/paris", title: "Example Docs" } }],
+        groundingSupports: [{
+          segment: { text: answer, startIndex: 0, endIndex: Buffer.byteLength(answer) },
+          groundingChunkIndices: [0],
+        }],
+      },
+    }],
+  });
+  strictAssert.deepEqual(liteResponse.supports?.map(support => support.partIndex), [2]);
+  strictAssert.ok(
+    formatSearchResult(liteResponse).startsWith(
+      `${answer} [1] [Example Docs](https://example.com/paris)`,
+    ),
+    "citation survives omitted partIndex after thought parts",
+  );
   strictAssert.deepEqual(grounded.supports?.[1]?.sourceIndices, [0, 2]);
   strictAssert.ok(!JSON.stringify(grounded).includes("Hidden"));
   const cited = formatSearchResult(grounded);
-  strictAssert.ok(cited.startsWith("First part.[1]\n\n日本語 clock.[1][3] More.[3]"));
+  // A source is linked in full the first time it is cited, so no bare `[n]` is left
+  // unexplained, and overlapping supports collapse into one marker per claim.
+  strictAssert.ok(
+    cited.startsWith(
+      `First part. [1] [A](https://example.com/a)\n\n${text} [1] [3] [B](https://example.com/b)`,
+    ),
+    `unexpected citation output: ${cited}`,
+  );
   strictAssert.ok(cited.includes("- [3] [B](https://example.com/b)"));
   strictAssert.ok(!cited.includes("Hidden"));
   strictAssert.ok(!cited.includes("�"));
@@ -196,7 +230,7 @@ async function main() {
         sourceIndices: [99, -1, 0.5, NaN, 2, 2],
       }],
     }),
-    "Fact.[3]\n\n### Sources\n- [3] [Source](https://example.com)",
+    "Fact. [3] [Source](https://example.com)\n\n### Sources\n- [3] [Source](https://example.com)",
   );
 
   // Preserve formatting and types for callers using the original public shape.
