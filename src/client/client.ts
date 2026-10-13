@@ -61,9 +61,9 @@ export function endpointCandidates(): string[] {
 }
 
 const DEFAULT_USER_AGENT =
-  "antigravity/cli/1.1.23 (aidev_client; os_type=linux; arch=amd64; cl=974125021; auth_method=consumer)";
+  "antigravity/acp/1.3.0 (aidev_client; os_type=linux; arch=x86_64; host_path=unknown/unknown; proxy_client=antigravity/sdk)";
 
-/** Default User-Agent matching pure Antigravity CLI wire fingerprint. */
+/** Match the official ACP client; the backend filters model discovery by User-Agent. */
 export function defaultUserAgent(): string {
   return DEFAULT_USER_AGENT;
 }

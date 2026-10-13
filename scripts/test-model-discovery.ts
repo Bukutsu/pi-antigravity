@@ -34,6 +34,7 @@ const catalog = buildAntigravityCatalog(
     "gemini-3.9-flash-low": info("Gemini 3.9 Flash (Low)"),
     "gemini-3.9-flash-medium": info("Gemini 3.9 Flash (Medium)"),
     "gemini-3.9-flash-high": info("Gemini 3.9 Flash (High)"),
+    "gemini-4-argon-medium": info("Gemini 4 Argon (Medium)"),
     chat_hidden: info("Hidden chat"),
     "gemini-3-pro-image": info("Gemini 3 Pro Image"),
   },
@@ -45,6 +46,15 @@ assert(!catalog.models.some((model) => model.id === "gemini-3-pro-image"), "filt
 assert(
   catalog.routing["gemini-3.9-flash"]?.routing?.medium === "gemini-3.9-flash-medium",
   "routes discovered thinking variants",
+);
+
+const argon = catalog.models.find((model) => model.id === "gemini-4-argon");
+assert(argon?.name === "Gemini 4 Argon (Antigravity)", "discovers Argon without a static entry");
+assert(argon.thinkingLevelMap?.medium === "medium", "advertises Argon Medium reasoning");
+assert(argon.thinkingLevelMap?.high === null, "does not invent Argon High reasoning");
+assert(
+  catalog.routing["gemini-4-argon"]?.routing?.medium === "gemini-4-argon-medium",
+  "routes Argon Medium to the advertised runtime",
 );
 
 // Provider-owned persistence restores routing and dynamic enums before offline/network checks.

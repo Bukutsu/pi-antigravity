@@ -1160,10 +1160,10 @@ const opusCost = ANTIGRAVITY_MODELS.find((m) => m.id === "claude-opus-4-6")?.cos
 assert.equal(opusCost?.input, 15);
 assert.equal(opusCost?.output, 75);
 
-// Wire fingerprint: User-Agent format (pure agy CLI)
+// Wire fingerprint: User-Agent format (official AGY ACP 1.3.0)
 assert.equal(
   defaultUserAgent(),
-  "antigravity/cli/1.1.23 (aidev_client; os_type=linux; arch=amd64; cl=974125021; auth_method=consumer)",
+  "antigravity/acp/1.3.0 (aidev_client; os_type=linux; arch=x86_64; host_path=unknown/unknown; proxy_client=antigravity/sdk)",
 );
 
 // Wire fingerprint: Headers hygiene & environment isolation
