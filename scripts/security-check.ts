@@ -1,4 +1,4 @@
-import { expect } from "bun:test";
+import assert from "node:assert/strict";
 import {
   getLastDiagnostics,
   resetDiagnosticsForTests,
@@ -16,28 +16,30 @@ import {
   resolveCallbackHost,
 } from "../src/utils/index.ts";
 
-expect(maskEmail("user@example.com")).toBe("u***r@example.com");
-expect(maskEmail("ab@example.com")).toBe("a***@example.com");
-expect(maskEmail("invalid-email")).toBe("[redacted-email]");
-expect(maskEmail(undefined)).toBeUndefined();
+assert.equal(maskEmail("user@example.com"), "u***r@example.com");
+assert.equal(maskEmail("ab@example.com"), "a***@example.com");
+assert.equal(maskEmail("invalid-email"), "[redacted-email]");
+assert.equal(maskEmail(undefined), undefined);
 
-expect(resolveCallbackHost("127.0.0.1")).toBe("127.0.0.1");
-expect(resolveCallbackHost("localhost")).toBe("127.0.0.1");
-expect(resolveCallbackHost("::1")).toBe("::1");
-expect(() => resolveCallbackHost("0.0.0.0")).toThrow(/loopback/i);
-expect(() => resolveCallbackHost("192.168.1.1")).toThrow(/loopback/i);
+assert.equal(resolveCallbackHost("127.0.0.1"), "127.0.0.1");
+assert.equal(resolveCallbackHost("localhost"), "127.0.0.1");
+assert.equal(resolveCallbackHost("::1"), "::1");
+assert.throws(() => resolveCallbackHost("0.0.0.0"), /loopback/i);
+assert.throws(() => resolveCallbackHost("192.168.1.1"), /loopback/i);
 
-expect(assertSafeApiBaseUrl("https://cloudcode-pa.googleapis.com/")).toBe(
+assert.equal(
+  assertSafeApiBaseUrl("https://cloudcode-pa.googleapis.com/"),
   "https://cloudcode-pa.googleapis.com",
 );
-expect(() => assertSafeApiBaseUrl("http://cloudcode-pa.googleapis.com")).toThrow(/https/i);
-expect(() => assertSafeApiBaseUrl("https://evil.example.com")).toThrow(/not allowed/i);
-expect(() => assertSafeApiBaseUrl("https://user:pass@cloudcode-pa.googleapis.com")).toThrow(
+assert.throws(() => assertSafeApiBaseUrl("http://cloudcode-pa.googleapis.com"), /https/i);
+assert.throws(() => assertSafeApiBaseUrl("https://evil.example.com"), /not allowed/i);
+assert.throws(
+  () => assertSafeApiBaseUrl("https://user:pass@cloudcode-pa.googleapis.com"),
   /credentials/i,
 );
 
-expect(escapeHtml(`<script>alert("x")</script>`)).toMatch(/&lt;script&gt;/);
-expect(escapeRegExp("a.b*c?")).toBe(String.raw`a\.b\*c\?`);
+assert.match(escapeHtml(`<script>alert("x")</script>`), /&lt;script&gt;/);
+assert.equal(escapeRegExp("a.b*c?"), String.raw`a\.b\*c\?`);
 
 const prefix = "ya29";
 const dummyToken = [prefix, "a0AfH6SMC-test"].join(".");
@@ -46,9 +48,9 @@ const dummyRefresh = ["1", "abcdefghijklmnopqrstuvwxyz12"].join("/");
 const leaked = redactSecrets(
   `Bearer ${dummyToken} token="${dummyToken2}" refresh_token=${dummyRefresh}`,
 );
-expect(leaked).not.toMatch(/ya29\./);
-expect(leaked).not.toMatch(/1\/abcdefgh/);
-expect(leaked).toMatch(/\[redacted/);
+assert.doesNotMatch(leaked, /ya29\./);
+assert.doesNotMatch(leaked, /1\/abcdefgh/);
+assert.match(leaked, /\[redacted/);
 
 resetDiagnosticsForTests();
 await Promise.all([
@@ -67,13 +69,13 @@ await Promise.all([
 ]);
 
 const last = getLastDiagnostics();
-expect(last.endpoint === "https://a.example" || last.endpoint === "https://b.example").toBe(true);
+assert.ok(last.endpoint === "https://a.example" || last.endpoint === "https://b.example");
 if (last.endpoint === "https://a.example") {
-  expect(last.status).toBe(200);
-  expect(last.error).toBe("error-a");
+  assert.equal(last.status, 200);
+  assert.equal(last.error, "error-a");
 } else {
-  expect(last.status).toBe(429);
-  expect(last.error).toBe("error-b");
+  assert.equal(last.status, 429);
+  assert.equal(last.error, "error-b");
 }
 
 console.log("security-check: ok");

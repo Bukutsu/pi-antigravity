@@ -1,5 +1,5 @@
+import assert from "node:assert/strict";
 import { formatUsageSummary } from "../src/usage/usage.js";
-import { expect } from "bun:test";
 
 console.log("Running usage formatter tests...");
 
@@ -20,8 +20,8 @@ const out = formatUsageSummary({
   quotaSummaryError: message3501,
 });
 
-expect(
+assert.ok(
   out.includes("needs a paid subscription") || out.includes("free-tier can't use that endpoint"),
-).toBe(true);
+);
 
 console.log("Usage formatter tests passed!");

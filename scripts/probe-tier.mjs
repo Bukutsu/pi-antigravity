@@ -1,4 +1,6 @@
-const auth = await Bun.file(`${Bun.env.HOME ?? Bun.env.USERPROFILE}/.pi/agent/auth.json`).json();
+import { authPath, readJson, writeJson, scriptDir } from "./fs-json.mjs";
+
+const auth = readJson(authPath());
 const creds = auth.antigravity;
 const authMod = await import(new URL("../src/auth/oauth.ts", import.meta.url).href);
 const client = await import(new URL("../src/client/client.ts", import.meta.url).href);
@@ -182,8 +184,5 @@ const summary = {
   ),
 };
 
-await Bun.write(
-  `${import.meta.dir}/probe-tier-results.json`,
-  JSON.stringify(sanitize(out), null, 2),
-);
+writeJson(`${scriptDir(import.meta.url)}/probe-tier-results.json`, sanitize(out));
 console.log(JSON.stringify(summary, null, 2));

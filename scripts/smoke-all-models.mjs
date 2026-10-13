@@ -1,23 +1,25 @@
 /**
  * Live smoke: hit every registered public model with a tiny prompt.
- * Usage: bun scripts/smoke-all-models.mjs
- *        FILTER=gemini-3.5-flash bun scripts/smoke-all-models.mjs
- *        FILTER=gemini-3.8-flash EFFORT=high bun scripts/smoke-all-models.mjs
- *        CONCURRENCY=2 TIMEOUT_MS=45000 bun scripts/smoke-all-models.mjs
+ * Usage: yarn smoke:models
+ *        FILTER=gemini-3.5-flash yarn smoke:models
+ *        FILTER=gemini-3.8-flash EFFORT=high yarn smoke:models
+ *        CONCURRENCY=2 TIMEOUT_MS=45000 yarn smoke:models
  */
 
-const authPath = Bun.env.PI_AUTH_PATH || `${Bun.env.HOME ?? Bun.env.USERPROFILE}/.pi/agent/auth.json`;
+import { authPath, readJson, writeJson, scriptDir } from "./fs-json.mjs";
+
+const credentialsPath = authPath();
 
 let auth;
 try {
-  auth = await Bun.file(authPath).json();
+  auth = readJson(credentialsPath);
 } catch (err) {
-  console.error(`Failed to read/parse auth file ${authPath}: ${err?.message || err}`);
+  console.error(`Failed to read/parse auth file ${credentialsPath}: ${err?.message || err}`);
   process.exit(1);
 }
 const creds = auth?.antigravity;
 if (!creds?.refresh) {
-  console.error(`No antigravity credentials in ${authPath}`);
+  console.error(`No antigravity credentials in ${credentialsPath}`);
   process.exit(1);
 }
 
@@ -26,11 +28,11 @@ const client = await import("../src/client/client.ts");
 const utils = await import("../src/utils/util.ts");
 const models = await import("../src/models/models.ts");
 
-const CONCURRENCY = Math.max(1, Number(Bun.env.CONCURRENCY || 2));
-const TIMEOUT_MS = Math.max(5000, Number(Bun.env.TIMEOUT_MS || 60_000));
-const FILTER = (Bun.env.FILTER || "").trim();
-const EFFORT = (Bun.env.EFFORT || "off").trim().toLowerCase();
-const PROMPT = Bun.env.PROMPT || "Reply with exactly one word: pong";
+const CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 2));
+const TIMEOUT_MS = Math.max(5000, Number(process.env.TIMEOUT_MS || 60_000));
+const FILTER = (process.env.FILTER || "").trim();
+const EFFORT = (process.env.EFFORT || "off").trim().toLowerCase();
+const PROMPT = process.env.PROMPT || "Reply with exactly one word: pong";
 
 console.log(`email=${creds.email || "none"} projectId(auth)=${creds.projectId || "none"}`);
 
@@ -247,26 +249,19 @@ const results = await mapPool(selected, CONCURRENCY, smokeOne);
 const passed = results.filter((r) => r.ok);
 const failed = results.filter((r) => !r.ok);
 
-const outPath = `${import.meta.dir}/smoke-all-models-results.json`;
-await Bun.write(
-  outPath,
-  JSON.stringify(
-    {
-      at: new Date().toISOString(),
-      email: creds.email,
-      projectId,
-      endpoint,
-      availableRuntimeModels: availableIds,
-      concurrency: CONCURRENCY,
-      effort: EFFORT,
-      timeoutMs: TIMEOUT_MS,
-      results,
-      summary: { total: results.length, passed: passed.length, failed: failed.length },
-    },
-    null,
-    2,
-  ),
-);
+const outPath = `${scriptDir(import.meta.url)}/smoke-all-models-results.json`;
+writeJson(outPath, {
+  at: new Date().toISOString(),
+  email: creds.email,
+  projectId,
+  endpoint,
+  availableRuntimeModels: availableIds,
+  concurrency: CONCURRENCY,
+  effort: EFFORT,
+  timeoutMs: TIMEOUT_MS,
+  results,
+  summary: { total: results.length, passed: passed.length, failed: failed.length },
+});
 
 console.log("\n========== SUMMARY ==========");
 console.log(`passed ${passed.length}/${results.length}`);

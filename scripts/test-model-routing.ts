@@ -1,11 +1,18 @@
-import type { Api, Context, Model, Tool } from "@earendil-works/pi-ai";
+import { inspect, isDeepStrictEqual } from "node:util";
+import {
+  isRetryableAssistantError,
+  type Api,
+  type Context,
+  type Model,
+  type Tool,
+} from "@earendil-works/pi-ai";
 import {
   antigravityHeaders,
   defaultProjectId,
   defaultUserAgent,
   stableProjectId,
 } from "../src/client/index.js";
-import { getLastDiagnostics, resetDiagnosticsForTests } from "../src/diagnostics/index.js";
+import { getLastDiagnostics, resetDiagnosticsForTests, setLastError } from "../src/diagnostics/index.js";
 import { GeminiToolCallingMode, StopReason, ToolChoice } from "../src/types/enums.js";
 import {
   ANTIGRAVITY_MODELS,
@@ -23,6 +30,7 @@ import {
 import {
   antigravityRequestEnvelope,
   clearSessionTrajectoryMap,
+  toInt64SessionId,
 } from "../src/utils/util.js";
 
 function fail(message: string): never {
@@ -37,8 +45,8 @@ const assert = {
     if (actual === expected) fail(`expected values not to be equal: ${String(actual)}`);
   },
   deepEqual(actual: unknown, expected: unknown, message?: string) {
-    if (!Bun.deepEquals(actual, expected)) {
-      fail(message ?? `expected ${Bun.inspect(expected)}, got ${Bun.inspect(actual)}`);
+    if (!isDeepStrictEqual(actual, expected)) {
+      fail(message ?? `expected ${inspect(expected)}, got ${inspect(actual)}`);
     }
   },
   ok(value: unknown, message?: string) {
@@ -557,16 +565,156 @@ assert.match(
   /Unknown name nullable/i,
 );
 
+const trailingModelError = friendlyAntigravityError(
+  400,
+  JSON.stringify({ error: { message: "Requests ending with a model turn are not supported." } }),
+);
+assert.match(trailingModelError, /message boundary/i);
+assert.match(trailingModelError, /new session|user message/i);
+assert.ok(!/re-login/i.test(trailingModelError));
+
+const functionCallBoundaryError = friendlyAntigravityError(
+  400,
+  JSON.stringify({
+    error: {
+      message:
+        "Please ensure that function call turn comes immediately after a user turn or after a function response turn.",
+    },
+  }),
+);
+assert.match(functionCallBoundaryError, /function-call message boundary/i);
+assert.match(functionCallBoundaryError, /new session/i);
+assert.match(functionCallBoundaryError, /re-login is not required/i);
 assert.equal(mapStopReason("STOP"), StopReason.Stop);
 assert.equal(mapStopReason("MAX_TOKENS"), StopReason.Length);
 assert.equal(mapStopReason("OTHER"), StopReason.Error);
 assert.equal(mapStopReason(undefined), StopReason.Stop);
 
 assert.match(friendlyAntigravityError(401, "nope"), /authentication failed/i);
+const validationBody = JSON.stringify({
+  error: {
+    code: 403,
+    message: "Verify your account to continue.",
+    details: [
+      {
+        metadata: {
+          validation_url:
+            "https://accounts.google.com/signin/continue?plt=session-secret&flowName=GlifWebSignIn",
+        },
+      },
+    ],
+  },
+});
+const validationError = friendlyAntigravityError(403, validationBody);
+assert.match(validationError, /accounts\.google\.com\/signin\/continue/);
+assert.match(validationError, /plt=session-secret/);
+setLastError(validationError);
+assert.equal(/plt=session-secret/.test(getLastDiagnostics().error || ""), false);
+assert.match(getLastDiagnostics().error || "", /Verify your account/);
+resetDiagnosticsForTests();
+const rejectedValidationUrl = friendlyAntigravityError(
+  403,
+  JSON.stringify({
+    error: {
+      message: "denied",
+      details: [{ metadata: { validation_url: "https://evil.example/phish" } }],
+    },
+  }),
+);
+assert.equal(/evil\.example/.test(rejectedValidationUrl), false, "reject non-Google validation URLs");
+assert.match(
+  friendlyAntigravityError(403, JSON.stringify({ error: { message: "permission denied" } })),
+  /access was denied/i,
+);
 assert.match(
   friendlyAntigravityError(429, "Individual quota reached. Resets in 1h"),
   /Quota reached/,
 );
+// Issue #49: transient 429 with generic "Resource has been exhausted (e.g. check quota)."
+// must be classified as rate limited with retryable tokens (429, ResourceExhausted) so Pi retries.
+const transient429Error = friendlyAntigravityError(
+  429,
+  JSON.stringify({
+    error: {
+      code: 429,
+      message: "Resource has been exhausted (e.g. check quota).",
+      status: "RESOURCE_EXHAUSTED",
+    },
+  }),
+);
+assert.ok(!/Quota reached/i.test(transient429Error), "transient 429 must not be classified as Quota reached");
+assert.match(transient429Error, /Rate limited by Antigravity \(429 ResourceExhausted\)/);
+assert.match(transient429Error, /retrying automatically/);
+
+// Real quota walls must remain non-retryable Quota reached
+const quotaResetError = friendlyAntigravityError(
+  429,
+  JSON.stringify({ error: { message: "Quota exceeded. Resets in 6 days." } }),
+);
+assert.match(quotaResetError, /Quota reached\. Please wait 6 days\./);
+
+const quotaWeeklyLimitError = friendlyAntigravityError(
+  429,
+  JSON.stringify({ error: { message: "You have exceeded your weekly limit." } }),
+);
+assert.match(quotaWeeklyLimitError, /Quota reached\./);
+assert.ok(!/Rate limited/i.test(quotaWeeklyLimitError));
+
+// Transient throttles and rate limits must be classified as retryable rate limits
+const plainThrottleError = friendlyAntigravityError(429, "Too many requests, slow down.");
+assert.match(plainThrottleError, /Rate limited by Antigravity \(429 ResourceExhausted\)/);
+
+const rateLimitReachedError = friendlyAntigravityError(429, "Rate limit reached, please slow down.");
+assert.match(rateLimitReachedError, /Rate limited by Antigravity \(429 ResourceExhausted\)/);
+assert.ok(!/Quota reached/i.test(rateLimitReachedError));
+
+// Verify compatibility with Pi's retry classifier
+assert.equal(
+  isRetryableAssistantError({
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: transient429Error,
+  } as unknown as Parameters<typeof isRetryableAssistantError>[0]),
+  true,
+  "transient 429 must be retryable by Pi",
+);
+assert.equal(
+  isRetryableAssistantError({
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: quotaResetError,
+  } as unknown as Parameters<typeof isRetryableAssistantError>[0]),
+  false,
+  "quota reset wall must not be retryable by Pi",
+);
+assert.equal(
+  isRetryableAssistantError({
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: quotaWeeklyLimitError,
+  } as unknown as Parameters<typeof isRetryableAssistantError>[0]),
+  false,
+  "quota weekly limit must not be retryable by Pi",
+);
+assert.equal(
+  isRetryableAssistantError({
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: plainThrottleError,
+  } as unknown as Parameters<typeof isRetryableAssistantError>[0]),
+  true,
+  "plain throttle must be retryable by Pi",
+);
+assert.equal(
+  isRetryableAssistantError({
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: rateLimitReachedError,
+  } as unknown as Parameters<typeof isRetryableAssistantError>[0]),
+  true,
+  "rate limit reached must be retryable by Pi",
+);
+
 assert.match(
   friendlyAntigravityError(400, JSON.stringify({ error: { message: "Unknown name anyOf" } })),
   /request format was rejected/i,
@@ -688,11 +836,15 @@ const consecutiveContext = {
   ],
 } as Context;
 const mergedContents = convertMessages(model, consecutiveContext, "claude-sonnet-4-6");
-assert.equal(mergedContents.length, 2);
+assert.equal(mergedContents.length, 3);
 assert.equal(mergedContents[0]?.role, "user");
 assert.equal(mergedContents[0]?.parts.length, 2);
 assert.equal(mergedContents[1]?.role, "model");
 assert.equal(mergedContents[1]?.parts.length, 2);
+assert.deepEqual(mergedContents[2], {
+  role: "user",
+  parts: [{ text: "Continue the active task using the available instructions and context." }],
+});
 
 // Test Base64 Image data URL prefix stripping
 const imageContext = {
@@ -871,6 +1023,124 @@ const zeroUsage = {
 const geminiRuntime = "gemini-3.7-flash-low";
 const validSig = "QkFTRTY0LXRlc3Qtc2lnbmF0dXJlLXRlc3QxMjM0NTY=";
 
+
+const continuationText = "Continue the active task using the available instructions and context.";
+
+// A normal assistant text reply must not leave the Antigravity request ending in a model turn.
+const assistantTailContext = {
+  messages: [
+    { role: "user", content: "Summarize this file.", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "The file defines the request adapter." }],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "gemini-3.7-flash",
+      usage: zeroUsage,
+      stopReason: "stop",
+      timestamp: Date.now(),
+    },
+  ],
+} as unknown as Context;
+const assistantTailContents = convertMessages(flash37Model, assistantTailContext, geminiRuntime);
+assert.deepEqual(
+  assistantTailContents.map((turn) => turn.role),
+  ["user", "model", "user"],
+  "a text assistant tail must receive a user continuation",
+);
+assert.deepEqual(assistantTailContents[1]?.parts, [
+  { text: "The file defines the request adapter." },
+]);
+assert.deepEqual(assistantTailContents[2]?.parts, [{ text: continuationText }]);
+
+const userTailContext = {
+  messages: [
+    { role: "user", content: "First request.", timestamp: Date.now() },
+    { role: "user", content: "Second request.", timestamp: Date.now() },
+  ],
+} as Context;
+const userTailContents = convertMessages(flash37Model, userTailContext, geminiRuntime);
+assert.deepEqual(userTailContents, [
+  { role: "user", parts: [{ text: "First request." }, { text: "Second request." }] },
+]);
+
+const unresolvedToolCallContext = {
+  messages: [
+    { role: "user", content: "Read package.json.", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "call-missing-result",
+          name: "read",
+          arguments: { path: "package.json" },
+          thoughtSignature: validSig,
+        },
+      ],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "gemini-3.7-flash",
+      usage: zeroUsage,
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    },
+  ],
+} as unknown as Context;
+let unresolvedToolCallError: unknown;
+try {
+  convertMessages(flash37Model, unresolvedToolCallContext, geminiRuntime);
+} catch (error) {
+  unresolvedToolCallError = error;
+}
+assert.ok(unresolvedToolCallError instanceof Error);
+assert.match(unresolvedToolCallError.message, /missing tool result/i);
+
+// Truncated/compacted history can begin with an assistant function call. Antigravity
+// requires that call turn to have an immediately preceding user boundary.
+const leadingToolCallContext = {
+  messages: [
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "call-leading",
+          name: "read",
+          arguments: { path: "package.json" },
+          thoughtSignature: validSig,
+        },
+      ],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "gemini-3.7-flash",
+      usage: zeroUsage,
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call-leading",
+      toolName: "read",
+      content: [{ type: "text", text: "package contents" }],
+      isError: false,
+      timestamp: Date.now(),
+    },
+  ],
+} as unknown as Context;
+const leadingToolCallContents = convertMessages(
+  flash37Model,
+  leadingToolCallContext,
+  geminiRuntime,
+ );
+assert.deepEqual(
+  leadingToolCallContents.map((turn) => turn.role),
+  ["user", "model", "user"],
+  "a leading function call must receive a preceding user bridge",
+);
+assert.deepEqual(leadingToolCallContents[0]?.parts, [{ text: continuationText }]);
+assert.ok(leadingToolCallContents[1]?.parts.every((part) => "functionCall" in part));
+assert.ok(leadingToolCallContents[2]?.parts.every((part) => "functionResponse" in part));
 const multimodalResultContext = {
   messages: [
     { role: "user", content: "take screenshot", timestamp: Date.now() },
@@ -1199,6 +1469,7 @@ assert.equal(envDefault.labels.request_id, `${envDefault.labels.trajectory_id}-0
 assert.equal(envDefault.labels.used_claude, "false");
 assert.equal(envDefault.labels.used_claude_conservative, "false");
 assert.equal(envDefault.labels.used_non_gemini_model, "false");
+assert.equal(envDefault.labels.last_execution_id, undefined);
 assert.equal(envDefault.labels.model_enum, "MODEL_PLACEHOLDER_M298");
 assert.match(envDefault.requestId, /^agent\/[0-9a-f-]+\/\d+\/[0-9a-f-]+\/1$/);
 
@@ -1214,11 +1485,24 @@ const envMultiTurn = antigravityRequestEnvelope("gpt-oss-120b-medium", {
   step: 3,
 });
 assert.equal(envMultiTurn.labels.last_step_index, "2");
+assert.match(envMultiTurn.labels.last_execution_id, /^[0-9a-f-]{36}$/);
 assert.equal(envMultiTurn.labels.request_id, `${envMultiTurn.labels.trajectory_id}-2`);
 assert.equal(envMultiTurn.labels.used_claude, "false");
 assert.equal(envMultiTurn.labels.used_non_gemini_model, "true");
 assert.equal(envMultiTurn.labels.model_enum, "MODEL_OPENAI_GPT_OSS_120B_MEDIUM");
 assert.match(envMultiTurn.requestId, /^agent\/[0-9a-f-]+\/\d+\/[0-9a-f-]+\/3$/);
+
+const envInitialWithOverride = antigravityRequestEnvelope("gemini-3.7-flash-high", {
+  step: 1,
+  lastExecutionId: "should-be-ignored-on-step-1",
+});
+assert.equal(envInitialWithOverride.labels.last_execution_id, undefined);
+
+const envSubsequentWithOverride = antigravityRequestEnvelope("gemini-3.7-flash-high", {
+  step: 2,
+  lastExecutionId: "custom-id-on-step-2",
+});
+assert.equal(envSubsequentWithOverride.labels.last_execution_id, "custom-id-on-step-2");
 
 // 2. buildRequest wire labels across models
 const claudeSonnetModel = ANTIGRAVITY_MODELS.find((m) => m.id === "claude-sonnet-4-6")!;
@@ -1240,6 +1524,150 @@ assert.equal(reqFlash38.request.labels?.used_claude_conservative, "false");
 assert.equal(reqFlash38.request.labels?.used_non_gemini_model, "false");
 assert.equal(reqFlash38.request.labels?.model_enum, "MODEL_PLACEHOLDER_M318");
 assert.match(reqFlash38.requestId, /\/1$/);
+
+// Multi-session isolation: two independent chats on the same account
+const reqChatA_1 = buildRequest(
+  ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.8-flash")!,
+  dummyContext,
+  "test-proj",
+  { sessionId: "chat-session-A" },
+  "gemini-3.8-flash-high",
+);
+const reqChatB_1 = buildRequest(
+  ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.8-flash")!,
+  dummyContext,
+  "test-proj",
+  { sessionId: "chat-session-B" },
+  "gemini-3.8-flash-high",
+);
+assert.notEqual(reqChatA_1.request.labels?.trajectory_id, reqChatB_1.request.labels?.trajectory_id);
+assert.equal(reqChatA_1.request.labels?.last_execution_id, undefined);
+assert.equal(reqChatB_1.request.labels?.last_execution_id, undefined);
+
+const multiTurnContext = {
+  ...dummyContext,
+  messages: [
+    { role: "user" as const, content: "hi" },
+    { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
+    { role: "user" as const, content: "next turn" },
+  ],
+};
+const reqChatA_2 = buildRequest(
+  ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.8-flash")!,
+  multiTurnContext,
+  "test-proj",
+  { sessionId: "chat-session-A" },
+  "gemini-3.8-flash-high",
+);
+const reqChatB_2 = buildRequest(
+  ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.8-flash")!,
+  multiTurnContext,
+  "test-proj",
+  { sessionId: "chat-session-B" },
+  "gemini-3.8-flash-high",
+);
+assert.ok(reqChatA_2.request.labels?.last_execution_id);
+assert.ok(reqChatB_2.request.labels?.last_execution_id);
+assert.notEqual(reqChatA_2.request.labels?.last_execution_id, reqChatB_2.request.labels?.last_execution_id);
+
+// Multi-turn sessionId stability with distinct explicit seeds (no cache claim).
+assert.equal(reqChatA_1.request.sessionId, reqChatA_2.request.sessionId);
+assert.equal(reqChatB_1.request.sessionId, reqChatB_2.request.sessionId);
+assert.notEqual(reqChatA_1.request.sessionId, reqChatB_1.request.sessionId);
+assert.match(reqChatA_1.request.sessionId!, /^-?\d+$/);
+
+// Omitted-ID fallback stays stable while the first-message seed stays unchanged.
+const defaultTurn1 = buildRequest(
+  ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.8-flash")!,
+  multiTurnContext,
+  "test-proj",
+  {},
+  "gemini-3.8-flash-high",
+);
+const defaultTurn2 = buildRequest(
+  ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.8-flash")!,
+  {
+    ...multiTurnContext,
+    messages: [
+      ...multiTurnContext.messages,
+      { role: "assistant" as const, content: [{ type: "text" as const, text: "turn 3" }] },
+    ],
+  },
+  "test-proj",
+  {},
+  "gemini-3.8-flash-high",
+);
+assert.ok(defaultTurn1.request.sessionId);
+assert.match(defaultTurn1.request.sessionId!, /^-?\d+$/);
+assert.equal(defaultTurn1.request.sessionId, defaultTurn2.request.sessionId);
+
+// Signed-int64 normalization and request integration.
+const int64Min = -(1n << 63n);
+const int64Max = (1n << 63n) - 1n;
+function assertInt64(value: string): void {
+  assert.match(value, /^-?\d+$/);
+  assert.ok(BigInt(value) >= int64Min && BigInt(value) <= int64Max, `out of int64 range: ${value}`);
+}
+const numericSeeds = [String(int64Min), String(int64Max), "0", "-1", "42", "00042", "-0"];
+const outOfRangeSeeds = [String(int64Min - 1n), String(int64Max + 1n)];
+const uuidSeed = "550e8400-e29b-41d4-a716-446655440000";
+for (const seed of numericSeeds) {
+  assert.equal(toInt64SessionId(seed), seed);
+  assert.equal(toInt64SessionId(`  ${seed}  `), seed);
+}
+for (const seed of [...outOfRangeSeeds, uuidSeed, "arbitrary-session"]) {
+  const normalized = toInt64SessionId(seed);
+  assertInt64(normalized);
+  assert.notEqual(normalized, seed);
+  assert.equal(toInt64SessionId(seed), normalized);
+}
+
+for (const seed of [...numericSeeds, ...outOfRangeSeeds, uuidSeed]) {
+  clearSessionTrajectoryMap();
+  const first = buildRequest(flash37Model, dummyContext, "test-proj", { sessionId: seed }, "gemini-3.7-flash-low");
+  const next = buildRequest(flash37Model, multiTurnContext, "test-proj", { sessionId: seed }, "gemini-3.7-flash-low");
+  assertInt64(first.request.sessionId!);
+  assert.equal(first.request.sessionId, toInt64SessionId(seed));
+  assert.equal(first.request.sessionId, next.request.sessionId);
+  clearSessionTrajectoryMap();
+  const afterClear = buildRequest(flash37Model, dummyContext, "test-proj", { sessionId: seed }, "gemini-3.7-flash-low");
+  assert.equal(afterClear.request.sessionId, first.request.sessionId);
+  assert.deepEqual(afterClear.request.labels, first.request.labels);
+  for (let index = 0; index < 65; index++) {
+    buildRequest(flash37Model, dummyContext, "test-proj", { sessionId: `eviction-${index}` }, "gemini-3.7-flash-low");
+  }
+  const afterEviction = buildRequest(flash37Model, dummyContext, "test-proj", { sessionId: seed }, "gemini-3.7-flash-low");
+  assert.equal(afterEviction.request.sessionId, first.request.sessionId);
+  assert.deepEqual(afterEviction.request.labels, first.request.labels);
+}
+
+clearSessionTrajectoryMap();
+const fallbackAfterClear = buildRequest(flash37Model, multiTurnContext, "test-proj", {}, "gemini-3.7-flash-low");
+assertInt64(fallbackAfterClear.request.sessionId!);
+assert.equal(fallbackAfterClear.request.sessionId, defaultTurn1.request.sessionId);
+for (let index = 0; index < 65; index++) {
+  buildRequest(flash37Model, dummyContext, "test-proj", { sessionId: `fallback-eviction-${index}` }, "gemini-3.7-flash-low");
+}
+assert.equal(
+  buildRequest(flash37Model, multiTurnContext, "test-proj", {}, "gemini-3.7-flash-low").request.sessionId,
+  defaultTurn1.request.sessionId,
+);
+
+// No usable seed remains random; whitespace-only explicit IDs also use this path.
+for (const seed of [undefined, "", "   "]) {
+  const first = toInt64SessionId(seed);
+  const next = toInt64SessionId(seed);
+  assertInt64(first);
+  assertInt64(next);
+  assert.notEqual(first, next);
+  const firstRequest = buildRequest(flash37Model, { messages: [] }, "test-proj", { sessionId: seed }, "gemini-3.7-flash-low");
+  const nextRequest = buildRequest(flash37Model, { messages: [] }, "test-proj", { sessionId: seed }, "gemini-3.7-flash-low");
+  assertInt64(firstRequest.request.sessionId!);
+  assertInt64(nextRequest.request.sessionId!);
+  assert.notEqual(firstRequest.request.sessionId, nextRequest.request.sessionId);
+}
+assertInt64(envDefault.sessionId);
+assertInt64(envClaude.sessionId);
 
 const reqFlash36 = buildRequest(
   ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.6-flash")!,

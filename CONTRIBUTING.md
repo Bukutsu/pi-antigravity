@@ -11,11 +11,12 @@ Thanks for improving `pi-antigravity`.
 ## Development setup
 
 ```bash
-bun install
-bun run check
+corepack enable
+yarn install
+yarn check
 ```
 
-This repo uses [Bun](https://bun.sh). `bun run check` runs TypeScript, ESLint, Prettier, and the repository security checks. Run it before opening a pull request.
+This repo uses [Yarn 4](https://yarnpkg.com/) through Corepack (Node 22+). `yarn check` runs TypeScript, ESLint, Prettier, tests, and `yarn npm audit`. Installs disable lifecycle scripts, verify lockfile checksums against the npm registry, and refuse package versions newer than three days. Run it before opening a pull request.
 
 ## Pull requests
 
@@ -23,7 +24,7 @@ This repo uses [Bun](https://bun.sh). `bun run check` runs TypeScript, ESLint, P
 2. Keep changes small and explain their user impact.
 3. Add or update tests when behavior changes.
 4. Update documentation when commands, authentication, configuration, or models change.
-5. Ensure `bun run check` passes.
+5. Ensure `yarn check` passes.
 
 Do not include credentials, access tokens, refresh tokens, OAuth client secrets, or private account data in commits, issues, pull requests, or logs.
 

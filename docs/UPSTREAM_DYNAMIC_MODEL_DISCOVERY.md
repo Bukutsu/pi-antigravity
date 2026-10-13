@@ -47,7 +47,7 @@ Verify the exact `refreshModels` types from the current `@earendil-works/pi-*` d
 - **Required:** existing Claude, GPT-OSS, Gemini 3.1/3.5 aliases and routing continue to work. Existing Gemini rollout remaps are unchanged.
 - **Required:** empty or failed discovery does not erase the last-known-good model catalog.
 - **Required:** existing OAuth, streaming, usage, diagnostics, image generation and runtime override behavior remain working.
-- **Required:** `bun run check` passes.
+- **Required:** `yarn check` passes.
 - **Conditional live validation:** when the current account/auth tier's `fetchAvailableModels` payload includes a newly available family, it should appear in Pi after refresh without editing the static list. Gemini 3.8 is that case only if the catalog exposes it; free-tier accounts that omit 3.8 are not a failure of this PR.
 
 ## Implementation notes

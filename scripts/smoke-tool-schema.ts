@@ -1,9 +1,11 @@
+import { readFileSync } from "node:fs";
 import type { Tool } from "@earendil-works/pi-ai";
 import { convertTools } from "../src/stream/index.js";
 import { refreshAntigravityToken } from "../src/auth/index.js";
 import { antigravityHeaders, DEFAULT_PROJECT_ID, endpointCandidates } from "../src/client/index.js";
 import { nowRequestId } from "../src/utils/index.js";
 import { getAntigravityRequestModelId } from "../src/models/index.js";
+import { authPath } from "./fs-json.mjs";
 
 type StoredCredentials = {
   refresh: string;
@@ -13,13 +15,13 @@ type StoredCredentials = {
   email?: string;
 };
 
-const authPath = `${Bun.env.HOME ?? Bun.env.USERPROFILE}/.pi/agent/auth.json`;
+const credentialsPath = authPath();
 let auth: { antigravity?: StoredCredentials };
 try {
-  auth = (await Bun.file(authPath).json()) as { antigravity?: StoredCredentials };
+  auth = JSON.parse(readFileSync(credentialsPath, "utf8")) as { antigravity?: StoredCredentials };
 } catch (error) {
   const detail = error instanceof Error ? error.message : String(error);
-  throw new Error(`Could not load Antigravity credentials from ${authPath}: ${detail}`);
+  throw new Error(`Could not load Antigravity credentials from ${credentialsPath}: ${detail}`);
 }
 if (!auth.antigravity) throw new Error("No Antigravity credentials. Run /login antigravity first.");
 

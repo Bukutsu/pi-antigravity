@@ -10,6 +10,9 @@ import {
   type Tool,
   type ToolCall,
 } from "@earendil-works/pi-ai";
+// Namespace import: transcript helpers exist on pi-ai >= 0.86; resolved at runtime.
+import * as piAi from "@earendil-works/pi-ai";
+import { failoverToNextAccount } from "../auth/accounts.js";
 import {
   antigravityHeaders,
   endpointCandidates,
@@ -47,7 +50,7 @@ import {
   getThinkingConfig,
   PROVIDER_ID,
 } from "../models/models.js";
-import { redactSecrets, safeError } from "../utils/security.js";
+import { extractValidationUrl, redactSecrets, safeError } from "../utils/security.js";
 import {
   ANTIGRAVITY_API,
   type ActiveBlock,
@@ -71,7 +74,7 @@ import {
   resolveSessionTrajectory,
   sanitizeText,
 } from "../utils/util.js";
-import { antigravityFetch } from "../utils/http.js";
+import { antigravityFetch, prewarmConnection } from "../utils/http.js";
 
 export { ANTIGRAVITY_API };
 
@@ -82,6 +85,7 @@ const ANTIGRAVITY_SYSTEM_INSTRUCTION =
 const ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION =
   'CRITICAL: NEVER output rule checks, formatting guidelines, constraint checklists (e.g. "No emdashes"), or your thinking/personality preambles in the final response. Output only the final response.';
 
+const CONTINUATION_TEXT = "Continue the active task using the available instructions and context.";
 let toolCallCounter = 0;
 
 function sanitizeToolCallId(id: string, fallbackName?: string): string {
@@ -97,6 +101,103 @@ function toolCallIdNeeded(modelId: string, runtimeModel: string): boolean {
     runtimeModel.startsWith("claude-") ||
     runtimeModel.startsWith("gpt-oss-")
   );
+}
+
+interface SystemMessageLike {
+  role?: string;
+  content?: string | Array<{ type?: string; text?: string }>;
+  sections?: Record<string, unknown>;
+  toolsAdded?: Tool[];
+  toolsRemoved?: Array<{ name: string }>;
+  tools?: Tool[];
+}
+
+interface PiAiTranscriptModule {
+  getCurrentTools?: (messages: Context["messages"]) => Tool[];
+  getCurrentSystemPrompt?: (messages: Context["messages"]) => string;
+}
+
+function transcriptModule(): PiAiTranscriptModule {
+  return piAi;
+}
+
+function asSystemMessages(messages: Context["messages"] | undefined): SystemMessageLike[] {
+  return [...(messages ?? [])] as SystemMessageLike[];
+}
+
+function extractTranscriptSystemPrompt(messages: readonly SystemMessageLike[]): string {
+  const parts: string[] = [];
+  for (const message of messages) {
+    if (message?.role !== "system") continue;
+    if (message.sections && typeof message.sections === "object") {
+      const sectionParts = Object.values(message.sections).filter(
+        (value): value is string => typeof value === "string" && value.trim().length > 0,
+      );
+      if (sectionParts.length > 0) {
+        parts.push(sectionParts.join("\n\n"));
+        continue;
+      }
+    }
+    if (typeof message.content === "string" && message.content.trim()) {
+      parts.push(message.content);
+    } else if (Array.isArray(message.content)) {
+      const texts = message.content
+        .map((block) => (typeof block === "string" ? block : block?.text || ""))
+        .filter((text) => text.trim().length > 0);
+      if (texts.length > 0) parts.push(texts.join("\n\n"));
+    }
+  }
+  return parts.join("\n\n");
+}
+
+function extractTranscriptTools(messages: readonly SystemMessageLike[]): Tool[] {
+  const tools = new Map<string, Tool>();
+  for (const message of messages) {
+    if (message?.role !== "system") continue;
+    for (const tool of message.toolsRemoved ?? []) {
+      tools.delete(tool.name);
+    }
+    for (const tool of [...(message.toolsAdded ?? []), ...(message.tools ?? [])]) {
+      if (tool && typeof tool.name === "string") tools.set(tool.name, tool);
+    }
+  }
+  return [...tools.values()];
+}
+
+/**
+ * pi >= 0.86 hands providers a normalized TranscriptContext: the system prompt and
+ * tool declarations live in system messages and must be read with
+ * `getCurrentSystemPrompt()` / `getCurrentTools()`. Older releases still pass the
+ * flat Context fields. Resolve both so requests are not sent without tools.
+ */
+export function resolveCurrentSystemPrompt(context: Context): string | undefined {
+  const helper = transcriptModule().getCurrentSystemPrompt;
+  if (typeof helper === "function") {
+    try {
+      const fromHelper = helper(context.messages ?? []);
+      if (fromHelper?.trim()) return fromHelper;
+    } catch {
+      // Fall through to local replay / legacy fields.
+    }
+  }
+  const fromTranscript = extractTranscriptSystemPrompt(asSystemMessages(context.messages));
+  if (fromTranscript.trim()) return fromTranscript;
+  return context.systemPrompt;
+}
+
+export function resolveCurrentTools(context: Context): Tool[] | undefined {
+  const helper = transcriptModule().getCurrentTools;
+  if (typeof helper === "function") {
+    try {
+      const fromHelper = helper(context.messages ?? []);
+      if (fromHelper.length > 0) return fromHelper;
+    } catch {
+      // Fall through to local replay / legacy fields.
+    }
+  }
+  const fromTranscript = extractTranscriptTools(asSystemMessages(context.messages));
+  if (fromTranscript.length > 0) return fromTranscript;
+  return context.tools;
 }
 
 const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
@@ -208,6 +309,7 @@ export function convertMessages(
   const requiresSig = geminiRequiresThoughtSignature(runtimeModel);
   const droppedToolCallIds = new Map<string, string>();
   for (const msg of context.messages) {
+    if ((msg.role as string) === "system") continue;
     if (msg.role === "user") {
       const parts = asTextParts(msg.content);
       appendTurn(contents, GeminiRole.User, parts);
@@ -314,6 +416,24 @@ export function convertMessages(
     }
   }
 
+  // A function-call model turn is only valid immediately after a user turn
+  // (including a function-response turn). Compacted history can drop that
+  // boundary, so restore it before applying the natural-language bridge.
+  for (let index = 0; index < contents.length; index += 1) {
+    const turn = contents[index];
+    if (
+      turn?.role === GeminiRole.Model &&
+      turn.parts.some((part) => "functionCall" in part) &&
+      contents[index - 1]?.role !== GeminiRole.User
+    ) {
+      contents.splice(index, 0, {
+        role: GeminiRole.User,
+        parts: [{ text: CONTINUATION_TEXT }],
+      });
+      index += 1;
+    }
+  }
+
   // Google Antigravity requires a natural-language user part in the request,
   // including tool-only continuation turns. Keep injected Skills in the system
   // instruction, then add this protocol bridge only when existing context gives
@@ -325,11 +445,21 @@ export function convertMessages(
   );
   if (!hasUserText && contents.length > 0) {
     const bridge = {
-      text: "Continue the active task using the available instructions and context.",
+      text: CONTINUATION_TEXT,
     };
     const userTurn = contents.find((turn) => turn.role === GeminiRole.User);
     if (userTurn) userTurn.parts.push(bridge);
     else contents.unshift({ role: GeminiRole.User, parts: [bridge] });
+  }
+
+  const lastTurn = contents.at(-1);
+  if (lastTurn?.role === GeminiRole.Model) {
+    if (lastTurn.parts.some((part) => "functionCall" in part)) {
+      throw new Error(
+        "Antigravity request is missing tool result(s) for the final assistant tool call. Provide the corresponding tool result before continuing.",
+      );
+    }
+    appendTurn(contents, GeminiRole.User, [{ text: CONTINUATION_TEXT }]);
   }
 
   return contents;
@@ -756,8 +886,10 @@ export function buildRequest(
   const injectedSkills = context.messages.flatMap((msg) =>
     msg.role === "user" ? skillBlocks(msg.content) : [],
   );
-  const systemParts = context.systemPrompt
-    ? [{ text: sanitizeText(context.systemPrompt) }]
+  const systemPromptText = resolveCurrentSystemPrompt(context);
+  const declaredTools = resolveCurrentTools(context);
+  const systemParts = systemPromptText
+    ? [{ text: sanitizeText(systemPromptText) }]
     : [{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION }, { text: ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION }];
   systemParts.push(...injectedSkills.map((skill) => ({ text: sanitizeText(skill) })));
 
@@ -767,7 +899,7 @@ export function buildRequest(
       turn.role === GeminiRole.User &&
       turn.parts.some((part) => "text" in part && Boolean(part.text.trim())),
   );
-  if (!hasUserText && (injectedSkills.length > 0 || Boolean(context.systemPrompt))) {
+  if (!hasUserText && (injectedSkills.length > 0 || Boolean(systemPromptText))) {
     contents.unshift({
       role: GeminiRole.User,
       parts: [{ text: "Apply the active system instructions." }],
@@ -795,7 +927,7 @@ export function buildRequest(
   if (Object.keys(generationConfig).length) request.generationConfig = generationConfig;
 
   const isClaude = model.id.startsWith("claude-") || runtimeModel.startsWith("claude-");
-  const tools = convertTools(context.tools, isClaude || model.id.startsWith("gpt-oss-"));
+  const tools = convertTools(declaredTools, isClaude || model.id.startsWith("gpt-oss-"));
   if (tools) {
     request.tools = tools;
   }
@@ -825,7 +957,10 @@ export function buildRequest(
       (m) => m.role === "assistant" && m.stopReason !== "error" && m.stopReason !== "aborted",
     ).length ?? 0;
 
-  const { conversationId, trajectoryId } = resolveSessionTrajectory(context);
+  const { conversationId, trajectoryId, sessionId } = resolveSessionTrajectory(
+    context,
+    options.sessionId,
+  );
 
   const envelope = antigravityRequestEnvelope(runtimeModel, {
     isClaude,
@@ -835,8 +970,9 @@ export function buildRequest(
     requestIndex,
     conversationId,
     trajectoryId,
+    sessionId,
   });
-  request.sessionId = options.sessionId || envelope.sessionId;
+  request.sessionId = envelope.sessionId;
   request.labels = envelope.labels;
 
   return {
@@ -860,6 +996,16 @@ export function mapStopReason(reason: string | undefined): StopReason {
 export function friendlyAntigravityError(status: number | undefined, text: string): string {
   const msg = redactSecrets(jsonOrTextError(text)).slice(0, 500);
   if (status === 400) {
+    if (/Requests ending with a model turn are not supported/i.test(msg)) {
+      return "Antigravity rejected an invalid conversation message boundary. Next: update the extension or add a user message / start a new session, then retry.";
+    }
+    if (
+      /function call turn comes immediately after a user turn or after a function response turn/i.test(
+        msg,
+      )
+    ) {
+      return "Antigravity rejected an invalid function-call message boundary. Next: update the extension or start a new session, then retry; re-login is not required.";
+    }
     if (/API key not valid|API_KEY_INVALID/i.test(msg)) {
       return "Antigravity login expired or credentials are invalid. Next: run /login antigravity, then retry.";
     }
@@ -875,10 +1021,14 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
     return "Antigravity authentication failed. Next: run /login antigravity, then retry.";
   }
   if (status === 403) {
-    if (/permission|forbidden|access/i.test(msg)) {
+    const verifyUrl = extractValidationUrl(text);
+    const verifyHint = verifyUrl
+      ? ` Open this link in a browser signed in to the same Google account to verify: ${verifyUrl}`
+      : "";
+    if (/permission|forbidden|access/i.test(msg) && !verifyUrl) {
       return "Antigravity access was denied for this account or project. Next: try another model, re-login, or use an account with access.";
     }
-    return `Antigravity denied this request. Next: re-login or try another model. Backend said: ${msg}`;
+    return `Antigravity denied this request. Next: re-login or try another model. Backend said: ${msg}${verifyHint}`;
   }
   if (status === 404) {
     if (/Requested entity was not found/i.test(msg)) {
@@ -895,10 +1045,20 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
     if (/Individual quota reached/i.test(msg)) {
       return `Quota reached. Please wait ${wait || "for reset"}. Next: switch models or try again after reset.`;
     }
-    if (/quota/i.test(msg)) {
+    // Google answers a real quota wall with a "Resets in …" hint, but uses generic
+    // RESOURCE_EXHAUSTED ("Resource has been exhausted (e.g. check quota).") for
+    // transient throttling and capacity pressure. Classifying on the word "quota"
+    // alone wrongly marked transient throttling as a hard quota wall, disabling
+    // Pi's automatic retry backoff. Keep real quota walls non-retryable, and
+    // format transient throttling so Pi's retry mechanism engages.
+    const hardLimit =
+      Boolean(wait) ||
+      (!/rate.?limit/i.test(msg) &&
+        /quota exceeded|exceeded your|limit reached|reached your|daily limit/i.test(msg));
+    if (hardLimit) {
       return `Quota reached.${wait ? ` Please wait ${wait}.` : ""} Next: switch models or retry later.`;
     }
-    return `Rate limited by Antigravity. Next: wait a bit and retry.${wait ? ` Reset: ${wait}.` : ""}`;
+    return "Rate limited by Antigravity (429 ResourceExhausted). Next: retrying automatically; if it persists, switch models.";
   }
   if (status === 500) {
     return "Antigravity had an internal server error. Next: retry in a moment or switch models.";
@@ -1003,7 +1163,6 @@ function guardResponseBody(
     if (stallMs <= 0) return;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => controller.abort(stallError(stallMs)), stallMs);
-    timer.unref?.();
   };
   let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
   const abortBody = () => {
@@ -1106,8 +1265,148 @@ export async function streamResponse(
   let started = false;
   let currentBlock: ActiveBlock | null = null;
   let hasContent = false;
+  let sawFinishReason = false;
+  let stray = "";
   const blocks = output.content;
   const blockIndex = () => blocks.length - 1;
+
+  const consumeStray = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith(":")) return;
+    stray = stray ? `${stray}\n${trimmed}` : trimmed;
+    const start = stray.indexOf("{");
+    if (start < 0) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stray.slice(start));
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed !== "object" || !("error" in parsed)) return;
+    const record = parsed as { error?: { code?: unknown; message?: unknown } };
+    const status = typeof record.error?.code === "number" ? record.error.code : undefined;
+    if (status !== undefined) setLastStatus(status);
+    const friendly = friendlyAntigravityError(status, stray.slice(start));
+    throw new Error(status ? `${friendly} (${status})` : friendly);
+  };
+
+  const handleLine = (line: string) => {
+    if (!line.startsWith("data:")) {
+      consumeStray(line);
+      return;
+    }
+    const json = line.slice(5).trim();
+    if (!json || json === "[DONE]") return;
+
+    let chunk: StreamChunk;
+    try {
+      chunk = JSON.parse(json) as StreamChunk;
+    } catch {
+      return;
+    }
+
+    if (chunk.error) {
+      const status = typeof chunk.error.code === "number" ? chunk.error.code : undefined;
+      if (status !== undefined) setLastStatus(status);
+      const friendly = friendlyAntigravityError(status, JSON.stringify({ error: chunk.error }));
+      throw new Error(status ? `${friendly} (${status})` : chunk.error.message || friendly);
+    }
+
+    const responseData = chunk.response || chunk;
+    const candidate = responseData.candidates?.[0];
+
+    for (const part of candidate?.content?.parts || []) {
+      if (part.text !== undefined) {
+        hasContent = true;
+        const isThinking = part.thought === true;
+        const type = isThinking ? "thinking" : "text";
+        if (!currentBlock || currentBlock.type !== type) {
+          finishCurrent();
+          currentBlock = isThinking
+            ? { type: "thinking", thinking: "", thinkingSignature: undefined }
+            : { type: "text", text: "" };
+          blocks.push(currentBlock);
+          ensureStarted();
+          stream.push({
+            type: isThinking ? "thinking_start" : "text_start",
+            contentIndex: blockIndex(),
+            partial: output,
+          });
+        }
+        if (isThinking && currentBlock.type === "thinking") {
+          currentBlock.thinking += part.text;
+          if (part.thoughtSignature) currentBlock.thinkingSignature = part.thoughtSignature;
+          stream.push({
+            type: "thinking_delta",
+            contentIndex: blockIndex(),
+            delta: part.text,
+            partial: output,
+          });
+        } else if (!isThinking && currentBlock.type === "text") {
+          currentBlock.text += part.text;
+          if (part.thoughtSignature) currentBlock.textSignature = part.thoughtSignature;
+          stream.push({
+            type: "text_delta",
+            contentIndex: blockIndex(),
+            delta: part.text,
+            partial: output,
+          });
+        }
+      }
+
+      if (part.functionCall) {
+        hasContent = true;
+        finishCurrent();
+        const rawId = part.functionCall.id || "";
+        const toolCall: ToolCall = {
+          type: "toolCall",
+          id: sanitizeToolCallId(rawId, part.functionCall.name),
+          name: part.functionCall.name || "",
+          arguments: asToolCallArguments(part.functionCall.args),
+          ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
+        };
+        blocks.push(toolCall);
+        ensureStarted();
+        stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
+        stream.push({
+          type: "toolcall_delta",
+          contentIndex: blockIndex(),
+          delta: JSON.stringify(toolCall.arguments),
+          partial: output,
+        });
+        stream.push({
+          type: "toolcall_end",
+          contentIndex: blockIndex(),
+          toolCall,
+          partial: output,
+        });
+      }
+    }
+
+    if (candidate?.finishReason) {
+      sawFinishReason = true;
+      output.rawStopReason = candidate.finishReason;
+      output.stopReason = blocks.some((b) => b.type === "toolCall")
+        ? StopReason.ToolUse
+        : mapStopReason(candidate.finishReason);
+    }
+
+    if (responseData.usageMetadata) {
+      const prompt = responseData.usageMetadata.promptTokenCount || 0;
+      const cacheRead = responseData.usageMetadata.cachedContentTokenCount || 0;
+      const thoughts = responseData.usageMetadata.thoughtsTokenCount || 0;
+      output.usage.input = prompt - cacheRead;
+      output.usage.output = (responseData.usageMetadata.candidatesTokenCount || 0) + thoughts;
+      output.usage.reasoning = thoughts;
+      output.usage.cacheRead = cacheRead;
+      output.usage.totalTokens = responseData.usageMetadata.totalTokenCount || 0;
+      if (model?.cost) {
+        calculateCost(model, output.usage);
+      } else {
+        output.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+      }
+    }
+  };
 
   const ensureStarted = () => {
     if (!started) {
@@ -1146,120 +1445,21 @@ export async function streamResponse(
     while ((newlineIdx = buffer.indexOf("\n", scanStart)) !== -1) {
       const line = buffer.slice(scanStart, newlineIdx);
       scanStart = newlineIdx + 1;
-      if (!line.startsWith("data:")) continue;
-      const json = line.slice(5).trim();
-      if (!json || json === "[DONE]") continue;
-
-      let chunk: StreamChunk;
-      try {
-        chunk = JSON.parse(json) as StreamChunk;
-      } catch {
-        continue;
-      }
-
-      if (chunk.error) {
-        throw new Error(chunk.error.message || JSON.stringify(chunk.error));
-      }
-
-      const responseData = chunk.response || chunk;
-      const candidate = responseData.candidates?.[0];
-
-      for (const part of candidate?.content?.parts || []) {
-        if (part.text !== undefined) {
-          hasContent = true;
-          const isThinking = part.thought === true;
-          const type = isThinking ? "thinking" : "text";
-          if (!currentBlock || currentBlock.type !== type) {
-            finishCurrent();
-            currentBlock = isThinking
-              ? { type: "thinking", thinking: "", thinkingSignature: undefined }
-              : { type: "text", text: "" };
-            blocks.push(currentBlock);
-            ensureStarted();
-            stream.push({
-              type: isThinking ? "thinking_start" : "text_start",
-              contentIndex: blockIndex(),
-              partial: output,
-            });
-          }
-          if (isThinking && currentBlock.type === "thinking") {
-            currentBlock.thinking += part.text;
-            if (part.thoughtSignature) currentBlock.thinkingSignature = part.thoughtSignature;
-            stream.push({
-              type: "thinking_delta",
-              contentIndex: blockIndex(),
-              delta: part.text,
-              partial: output,
-            });
-          } else if (!isThinking && currentBlock.type === "text") {
-            currentBlock.text += part.text;
-            if (part.thoughtSignature) currentBlock.textSignature = part.thoughtSignature;
-            stream.push({
-              type: "text_delta",
-              contentIndex: blockIndex(),
-              delta: part.text,
-              partial: output,
-            });
-          }
-        }
-
-        if (part.functionCall) {
-          hasContent = true;
-          finishCurrent();
-          const rawId = part.functionCall.id || "";
-          const toolCall: ToolCall = {
-            type: "toolCall",
-            id: sanitizeToolCallId(rawId, part.functionCall.name),
-            name: part.functionCall.name || "",
-            arguments: asToolCallArguments(part.functionCall.args),
-            ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
-          };
-          blocks.push(toolCall);
-          ensureStarted();
-          stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
-          stream.push({
-            type: "toolcall_delta",
-            contentIndex: blockIndex(),
-            delta: JSON.stringify(toolCall.arguments),
-            partial: output,
-          });
-          stream.push({
-            type: "toolcall_end",
-            contentIndex: blockIndex(),
-            toolCall,
-            partial: output,
-          });
-        }
-      }
-
-      if (candidate?.finishReason) {
-        output.rawStopReason = candidate.finishReason;
-        output.stopReason = blocks.some((b) => b.type === "toolCall")
-          ? StopReason.ToolUse
-          : mapStopReason(candidate.finishReason);
-      }
-
-      if (responseData.usageMetadata) {
-        const prompt = responseData.usageMetadata.promptTokenCount || 0;
-        const cacheRead = responseData.usageMetadata.cachedContentTokenCount || 0;
-        const thoughts = responseData.usageMetadata.thoughtsTokenCount || 0;
-        output.usage.input = prompt - cacheRead;
-        output.usage.output = (responseData.usageMetadata.candidatesTokenCount || 0) + thoughts;
-        output.usage.reasoning = thoughts;
-        output.usage.cacheRead = cacheRead;
-        output.usage.totalTokens = responseData.usageMetadata.totalTokenCount || 0;
-        if (model?.cost) {
-          calculateCost(model, output.usage);
-        } else {
-          output.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-        }
-      }
+      handleLine(line.replace(/\r$/, ""));
     }
 
     if (scanStart > 0) {
       buffer = buffer.slice(scanStart);
       scanStart = 0;
     }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.length > 0) handleLine(buffer.replace(/\r$/, ""));
+  if (!sawFinishReason) {
+    throw new Error(
+      "Antigravity stream ended without a finish reason; the response was terminated before completion.",
+    );
   }
 
   finishCurrent();
@@ -1278,10 +1478,13 @@ export function streamAntigravity(
     const startTime = Date.now();
     const output = createOutput(model);
     try {
-      const creds = parseApiKey(opts.apiKey);
+      let creds = parseApiKey(opts.apiKey);
+      const triedAccessTokens = new Set<string>([creds.token]);
+      const primaryEndpoint = endpointCandidates()[0];
+      if (primaryEndpoint) prewarmConnection(primaryEndpoint);
       // Skip loadCodeAssist roundtrip when credentials already carry a projectId.
       const warmedProject = creds.projectId ? null : await loadCodeAssist(creds.token);
-      const projectId = resolveProjectId({
+      let projectId = resolveProjectId({
         token: creds.token,
         warmedProject,
         credentialProjectId: creds.projectId,
@@ -1309,7 +1512,7 @@ export function streamAntigravity(
         runtimeCandidates.push(fallback);
       }
 
-      const requestHeaders = antigravityHeaders(creds.token);
+      let requestHeaders = antigravityHeaders(creds.token);
 
       let response: Response | undefined;
       let lastText = "";
@@ -1344,7 +1547,15 @@ export function streamAntigravity(
             setLastStatus(response.status);
             if (response.ok) break;
             lastText = await response.text();
-            if (response.status === 429 && /Individual quota reached/i.test(lastText)) break;
+            if (
+              response.status === 429 &&
+              (/Individual quota reached/i.test(lastText) ||
+                /Resets? in /i.test(lastText) ||
+                (!/rate.?limit/i.test(lastText) &&
+                  /quota exceeded|exceeded your|daily limit/i.test(lastText)))
+            ) {
+              break;
+            }
             if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break;
           }
 
@@ -1405,6 +1616,21 @@ export function streamAntigravity(
           }
           const friendly = friendlyAntigravityError(response?.status, lastText);
           if (response?.status === 429 && /Quota reached\./i.test(friendly)) {
+            const next = await failoverToNextAccount(triedAccessTokens);
+            if (next) {
+              triedAccessTokens.add(next.token);
+              creds = next;
+              requestHeaders = antigravityHeaders(creds.token);
+              const switchedProject = creds.projectId ? null : await loadCodeAssist(creds.token);
+              projectId = resolveProjectId({
+                token: creds.token,
+                warmedProject: switchedProject,
+                credentialProjectId: creds.projectId,
+              });
+              setLastProjectId(projectId);
+              emptyAttempt = -1;
+              continue;
+            }
             throw new Error(friendly);
           }
           throw new Error(

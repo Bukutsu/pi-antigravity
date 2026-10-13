@@ -1,4 +1,6 @@
-const auth = await Bun.file(`${Bun.env.HOME ?? Bun.env.USERPROFILE}/.pi/agent/auth.json`).json();
+import { authPath, readJson } from "./fs-json.mjs";
+
+const auth = readJson(authPath());
 const creds = auth.antigravity;
 const authMod = await import(new URL("../src/auth/oauth.ts", import.meta.url).href);
 const client = await import(new URL("../src/client/client.ts", import.meta.url).href);

@@ -4,9 +4,66 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-08
+
 ### Added
 
-- **Dynamic model discovery:** The selectable catalog is refreshed from authenticated `fetchAvailableModels` and grouped into public Pi IDs, so newly enabled models can appear without a catalog-only release. Last-known-good cache plus a conservative static seed remain for cold start. Discovery does not add a new cross-generation fallback; existing Gemini rollout remaps are unchanged.
+- **Native image API:** Pi `generateImages` / codemode can call `gemini-3.1-flash-image` without saving files (#82).
+- **Per-feature toggles:** `pi config` can disable `src/features/google-search.ts` or `src/features/generate-image.ts` while keeping the provider and slash commands. Environment variables still force a loaded tool off (#79).
+
+### Changed
+
+- **Google Search default:** Interactive search uses `gemini-3.5-flash-lite` with a compact evidence brief and no default thinking budget. `--thinking` and `--model` still override it. Fallbacks are `gemini-3.1-flash-lite` and `gemini-3-flash` (#80).
+- **Image requests:** Default image model is `gemini-3.1-flash-image`, using the direct image endpoint and `image_gen` request type, with the legacy stream endpoint only on HTTP 404 (#81).
+
+### Fixed
+
+- **Subscription marker:** The OAuth registration now sets `isSubscription`, so Pi classifies Antigravity models as subscription-backed (footer `(sub)` marker) instead of metered (#74).
+- **Search citations:** Inline Google Search citations use UTF-8 byte offsets and keep original source indexes (#78).
+- **Session IDs:** Explicit and fallback session IDs are stable signed-int64 values instead of a new random ID on every omitted-ID request (#76, #77).
+- **Mid-stream errors:** A trailing 500/503 body, or a stream that ends without `finishReason`, is reported as an error instead of a successful stop (#72).
+- **Account verification:** A 403 `VALIDATION_REQUIRED` response includes the `accounts.google.com` verification link. `/antigravity.doctor` still redacts that link (#73).
+
+## [0.9.0] - 2026-09-30
+
+### Added
+
+- **Extra tool toggles:** `ANTIGRAVITY_NO_EXTRA_TOOLS`, `ANTIGRAVITY_NO_SEARCH_TOOL`, and `ANTIGRAVITY_NO_IMAGE_TOOL` stop the `google_search` / `generate_image` tools from being registered so they do not clash with other search providers (#65).
+
+### Changed
+
+- **Dependencies:** Bump undici to 8.11.2 and dev tooling to pi 0.86.1, which clears the high-severity undici advisories (GHSA-rfgv-xxqx-mfg5, GHSA-w293-vg96-wgc3) reported by `yarn audit`.
+
+### Fixed
+
+- **Emoji corruption:** `sanitizeText` now only replaces unpaired surrogates, so valid emoji and other astral characters are no longer turned into U+FFFD (#66, #67, thanks @sobh).
+- **OAuth response decompression:** Use the existing Undici fetch for Google OAuth requests so SDK hosts do not parse raw gzip bytes as JSON with Node 26 built-in fetch (#69, thanks @Nyarlathoteppppp).
+
+## [0.8.1] - 2026-09-28
+
+### Added
+
+- **Google Search grounding:** `google_search` and `/antigravity.search` run an isolated Cloud Code Assist search request through the signed-in session (#62).
+
+### Fixed
+
+- **Oh My Pi install:** Load `registerApiProvider` from a namespace import so `omp plugin install npm:pi-antigravity` does not fail when the bundled Pi runtime omits that export (#61).
+- **Wire fingerprint:** Match Antigravity CLI 1.2.4 user-agent labels and keep multi-turn `last_execution_id` off the first step, with separate trajectory ids per session (#63).
+
+## [0.8.0] - 2026-09-20
+
+### Added
+
+- **Linked Google accounts:** `/login antigravity` keeps previous accounts in `~/.pi/agent/antigravity-accounts.json`. `/antigravity.accounts` lists, switches, and removes them. A hard quota wall automatically fails over to the next linked account (#47, #58).
+
+### Changed
+
+- **Yarn 4 toolchain:** Development, CI, and publish use Corepack-pinned Yarn 4 instead of Bun. Installs run with lifecycle scripts disabled, lockfile checksum verification, a 3-day npm publish age gate, and `yarn npm audit`. Releases publish with npm provenance.
+
+### Fixed
+
+- **Pi 0.86 tools and system prompt:** Read prompt and tool declarations from normalized transcript system messages (`getCurrentSystemPrompt` / `getCurrentTools`, with a local replay fallback) so requests are not sent without tools (#51, #52, #53, #54, #55, #57).
+- **Startup freeze:** TLS pre-warm runs on the first Antigravity request instead of at extension load, so Pi startup is not blocked for ~10s on Node 24 (#50).
 
 ## [0.7.1] - 2026-09-03
 

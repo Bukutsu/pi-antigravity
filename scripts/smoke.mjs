@@ -1,4 +1,6 @@
-const auth = await Bun.file(`${Bun.env.HOME ?? Bun.env.USERPROFILE}/.pi/agent/auth.json`).json();
+import { authPath, readJson } from "./fs-json.mjs";
+
+const auth = readJson(authPath());
 const creds = auth.antigravity;
 if (!creds?.refresh) {
   console.error("No antigravity credentials in auth.json");
