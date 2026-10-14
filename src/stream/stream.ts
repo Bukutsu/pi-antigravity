@@ -18,6 +18,7 @@ import {
   endpointCandidates,
   fetchAvailableRuntimeModel,
   formatRequestDiagnostics,
+  isUsableRuntimeModelId,
   jsonOrTextError,
   loadCodeAssist,
   parseApiKey,
@@ -1501,7 +1502,7 @@ export function streamAntigravity(
       // Dynamic lookup is only needed for unmapped custom models.
       if (!isKnownModel && !antigravityEnv("RUNTIME_MODEL")) {
         const dynamic = await fetchAvailableRuntimeModel(creds.token, projectId, baseRuntimeModel);
-        if (dynamic?.id && /^(gemini-|claude-|gpt-oss-)/i.test(dynamic.id)) {
+        if (dynamic?.id && isUsableRuntimeModelId(dynamic.id)) {
           initialRuntimeModel = dynamic.id;
         }
       }
@@ -1573,7 +1574,7 @@ export function streamAntigravity(
               if (
                 dynamic?.id &&
                 !runtimeCandidates.includes(dynamic.id) &&
-                /^(gemini-|claude-|gpt-oss-)/i.test(dynamic.id)
+                isUsableRuntimeModelId(dynamic.id)
               ) {
                 runtimeCandidates.push(dynamic.id);
                 continue;
