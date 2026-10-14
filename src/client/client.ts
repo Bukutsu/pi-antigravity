@@ -236,7 +236,17 @@ function buildModelMatchRegex(requestedId: string): RegExp {
   if (req === "gemini-3.1-pro-high" || req === "gemini-pro-agent")
     return /gemini[- ]3\.1[- ]pro \(high\)/i;
   const escaped = escapeRegExp(req).replace(/\\-/g, "[- ]");
-  return new RegExp(escaped, "i");
+  return new RegExp(`^${escaped}$`, "i");
+}
+
+function hasLegacyAlias(requestedId: string): boolean {
+  const req = requestedId.toLowerCase();
+  return (
+    req.startsWith("gemini-") ||
+    req.includes("claude-opus-4-6") ||
+    req.includes("claude-sonnet-4-6") ||
+    req.includes("gpt-oss-120b")
+  );
 }
 
 function dynamicModelFromInfo(modelId: string, info: unknown): DynamicModelInfo {
@@ -270,6 +280,17 @@ function findDynamicModel(value: unknown, requestedId: string): DynamicModelInfo
     const modelsMap = value.models;
     if (isUsableRuntimeModelId(requestedId) && requestedId in modelsMap) {
       return dynamicModelFromInfo(requestedId, modelsMap[requestedId]);
+    }
+    const lowerReq = requestedId.toLowerCase();
+    for (const [modelId, info] of Object.entries(modelsMap)) {
+      if (modelId.toLowerCase() === lowerReq && isUsableRuntimeModelId(modelId)) {
+        return dynamicModelFromInfo(modelId, info);
+      }
+    }
+
+    // Opaque and non-alias IDs require exact-key matches to prevent near-miss prefix collisions.
+    if (!hasLegacyAlias(requestedId)) {
+      return undefined;
     }
 
     const targetRegex = buildModelMatchRegex(requestedId);

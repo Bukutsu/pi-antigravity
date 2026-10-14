@@ -238,9 +238,11 @@ function synthesizeModel(
   const routing = routingFromVariants(group.publicId, group.variants, group.unsuffixed);
   const supportsImages = group.supportsImages ?? template?.input.includes("image") ?? true;
   const reasoning =
-    advertisedLevels.size > 0 ||
-    group.supportsThinking === true ||
-    (group.supportsThinking === undefined && Boolean(template?.reasoning));
+    group.supportsThinking === false
+      ? false
+      : advertisedLevels.size > 0 ||
+        group.supportsThinking === true ||
+        (group.supportsThinking === undefined && Boolean(template?.reasoning));
   return {
     model: {
       id: group.publicId,
@@ -257,10 +259,10 @@ function synthesizeModel(
 }
 
 function advertisedThinkingLevels(group: RuntimeGroup): Set<string> {
+  // An explicit denial overrides levels inferred from display names or suffixes.
+  if (group.supportsThinking === false) return new Set();
   const levels = new Set(Object.keys(group.variants));
   if (levels.size > 0) return levels;
-  // Explicit false from the catalog must not grow a fake High control.
-  if (group.supportsThinking === false) return levels;
   if (group.supportsThinking === true) {
     levels.add(ThinkingEffort.High);
   }

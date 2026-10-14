@@ -4,7 +4,11 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
-import { antigravityHeaders, mergeAvailableModelsResults } from "../src/client/index.js";
+import {
+  antigravityHeaders,
+  fetchAvailableRuntimeModel,
+  mergeAvailableModelsResults,
+} from "../src/client/index.js";
 import {
   ANTIGRAVITY_MODELS,
   ANTIGRAVITY_PERSIST_KEY,
@@ -173,6 +177,9 @@ for (const supportsThinking of [false, true, undefined]) {
       "gemini-101-pro-low",
       "explicitly non-thinking agent must not become the target's High route",
     );
+    const agentModel = grouped.models.find((m) => m.id === "gemini-pro-agent");
+    assert.equal(agentModel?.reasoning, false, "explicit denial stops reasoning flag");
+    assert.equal(agentModel?.thinkingLevelMap, undefined, "explicit denial stops thinkingLevelMap");
   } else {
     assert.equal(grouped.models.length, 1);
     assert.equal(route.routing?.high, "gemini-pro-agent");
@@ -463,5 +470,33 @@ assert(
   !("Accept" in antigravityHeaders("test-token")),
   "discovery must not inject an Accept header",
 );
+
+// Opaque runtime IDs require exact key matches and do not match near-miss prefix keys.
+let endpointProbeCount = 0;
+globalThis.fetch = async () => {
+  endpointProbeCount++;
+  if (endpointProbeCount === 1) {
+    // First endpoint has near-miss prefix
+    return new Response(
+      JSON.stringify({ models: { runtime_abc1234: { displayName: "Near miss" } } }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  // Second endpoint has exact key
+  return new Response(
+    JSON.stringify({ models: { runtime_abc123: { displayName: "Exact match" } } }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  );
+};
+try {
+  const match = await fetchAvailableRuntimeModel("test-token-exact", "test-proj", "runtime_abc123");
+  assert.equal(
+    match?.id,
+    "runtime_abc123",
+    "opaque runtime ID matches exact key on second endpoint, not near-miss prefix on first",
+  );
+} finally {
+  globalThis.fetch = originalFetch;
+}
 
 console.log("model discovery: live metadata, routing, validation, persistence, and TTL passed");
