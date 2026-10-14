@@ -239,14 +239,33 @@ function buildModelMatchRegex(requestedId: string): RegExp {
   return new RegExp(`^${escaped}$`, "i");
 }
 
+const LEGACY_ALIASES = new Set([
+  "gemini-3.8-flash-low",
+  "gemini-3.8-flash-medium",
+  "gemini-3.8-flash-high",
+  "gemini-3.7-flash-low",
+  "gemini-3.7-flash-medium",
+  "gemini-3.7-flash-high",
+  "gemini-3.6-flash-low",
+  "gemini-3.6-flash-medium",
+  "gemini-3.6-flash-high",
+  "gemini-3.5-flash-extra-low",
+  "gemini-3.5-flash-low",
+  "gemini-3.5-flash-medium",
+  "gemini-3.5-flash-high",
+  "gemini-3-flash-agent",
+  "gemini-3.1-pro-low",
+  "gemini-3.1-pro-high",
+  "gemini-pro-agent",
+  "claude-opus-4-6",
+  "claude-opus-4-6-thinking",
+  "claude-sonnet-4-6",
+  "gpt-oss-120b",
+  "gpt-oss-120b-medium",
+]);
+
 function hasLegacyAlias(requestedId: string): boolean {
-  const req = requestedId.toLowerCase();
-  return (
-    req.startsWith("gemini-") ||
-    req.includes("claude-opus-4-6") ||
-    req.includes("claude-sonnet-4-6") ||
-    req.includes("gpt-oss-120b")
-  );
+  return LEGACY_ALIASES.has(requestedId.toLowerCase());
 }
 
 function dynamicModelFromInfo(modelId: string, info: unknown): DynamicModelInfo {
