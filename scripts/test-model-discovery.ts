@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import { antigravityHeaders, mergeAvailableModelsResults } from "../src/client/index.js";
 import {
@@ -153,6 +157,80 @@ assert.equal(
   "gemini-pro-agent",
   "agent aliases follow current metadata, not pinned versions",
 );
+
+// Agent groups with multiple runtimes must remain independently routable,
+// including a group with both an unsuffixed runtime and a thinking variant.
+for (const agentModels of [
+  {
+    "gemini-pro-agent-low": info("Gemini 101 Pro (Low)"),
+    "gemini-pro-agent-high": info("Gemini 101 Pro (High)"),
+  },
+  {
+    "gemini-pro-agent": info("Gemini 101 Pro"),
+    "gemini-pro-agent-high": info("Gemini 101 Pro (High)"),
+  },
+]) {
+  const grouped = buildAntigravityCatalog(
+    {
+      "gemini-101-pro-medium": info("Gemini 101 Pro (Medium)"),
+      ...agentModels,
+    },
+    fallback,
+  );
+  assert.equal(grouped.models.length, 2);
+  const agentRoute = grouped.routing["gemini-pro-agent"];
+  assert.ok(agentRoute, "multi-runtime agent group must not be deleted");
+  assert.equal(agentRoute.routing?.high, "gemini-pro-agent-high");
+  if ("gemini-pro-agent-low" in agentModels) {
+    assert.equal(agentRoute.routing?.low, "gemini-pro-agent-low");
+  }
+}
+
+const suffixedAlias = buildAntigravityCatalog(
+  {
+    "gemini-101-pro-medium": info("Gemini 101 Pro (Medium)"),
+    "gemini-pro-agent-high": info("Gemini 101 Pro"),
+  },
+  fallback,
+);
+assert.equal(suffixedAlias.models.length, 1);
+assert.equal(suffixedAlias.routing["gemini-101-pro"].routing?.high, "gemini-pro-agent-high");
+
+// The live probe must continue and summarize when one endpoint has no supported
+// chat entries. Fake credentials and fetch keep this subprocess entirely offline.
+const probeDir = mkdtempSync(join(tmpdir(), "antigravity-probe-"));
+try {
+  const authFile = join(probeDir, "auth.json");
+  writeFileSync(authFile, JSON.stringify({ antigravity: { access: "fake", projectId: "fake" } }));
+  const probe = spawnSync(
+    process.execPath,
+    [
+      "scripts/run-ts.mjs",
+      "-e",
+      `
+    let calls = 0;
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      models: ++calls === 1
+        ? { chat_hidden: { displayName: "Hidden chat" } }
+        : { "gemini-99-flash-low": { displayName: "Gemini 99 Flash (Low)" } },
+    }));
+    await import("./scripts/probe-model-discovery.mjs");
+  `,
+    ],
+    {
+      env: { ...process.env, PI_AUTH_PATH: authFile, ANTIGRAVITY_BASE_URL: "" },
+      encoding: "utf8",
+      timeout: 15000,
+    },
+  );
+  assert.ifError(probe.error);
+  assert.equal(probe.status, 1, "unsupported catalog is a probe failure");
+  assert.match(probe.stdout, /FAIL .* supported chat catalog/);
+  assert.match(probe.stdout, /PASS https:\/\/cloudcode-pa.googleapis.com supported chat catalog/);
+  assert.match(probe.stdout, /Live discovery probe: 9 passed, 1 failed/);
+} finally {
+  rmSync(probeDir, { recursive: true, force: true });
+}
 
 const merged = mergeAvailableModelsResults([
   { endpoint: "valid", status: 200, data: { models: future } },

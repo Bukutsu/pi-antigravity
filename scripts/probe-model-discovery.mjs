@@ -80,7 +80,11 @@ for (const endpoint of endpointCandidates()) {
     raw = data.models;
   });
   if (!raw) continue;
-  const catalog = buildAntigravityCatalog(raw, fallback);
+  let catalog;
+  await check(endpoint + " supported chat catalog", () => {
+    catalog = buildAntigravityCatalog(raw, fallback);
+  });
+  if (!catalog) continue;
   console.log(
     "INFO " +
       endpoint +
