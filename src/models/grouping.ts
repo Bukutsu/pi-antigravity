@@ -166,6 +166,11 @@ function absorbMetadata(
 function mergeAgentSingletons(groups: Map<string, RuntimeGroup>): void {
   for (const [publicId, group] of [...groups.entries()]) {
     if (!publicId.endsWith("-agent")) continue;
+    const runtimeIds = [group.unsuffixed, ...Object.values(group.variants)].filter(
+      (id): id is string => id !== undefined,
+    );
+    if (runtimeIds.length !== 1) continue;
+    const [runtimeId] = runtimeIds;
     const family = displayFamily(group.displayNames[0]);
     if (!family) continue;
     const target = [...groups.values()].find(
@@ -173,9 +178,11 @@ function mergeAgentSingletons(groups: Map<string, RuntimeGroup>): void {
         candidate.publicId !== publicId &&
         candidate.displayNames.some((name) => displayFamily(name) === family),
     );
-    const runtimeId = group.unsuffixed ?? Object.values(group.variants)[0];
-    if (!target || !runtimeId) continue;
-    const level = levelFromDisplayName(group.displayNames[0]);
+    if (!target) continue;
+    const level =
+      (Object.keys(group.variants) as ThinkingLevel[]).find(
+        (candidate) => group.variants[candidate] === runtimeId,
+      ) ?? levelFromDisplayName(group.displayNames[0]);
     if (!level || target.variants[level]) continue;
     target.variants[level] = runtimeId;
     absorbMetadata(
