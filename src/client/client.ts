@@ -189,9 +189,15 @@ function summarizeModelCandidate(value: unknown): string {
   return JSON.stringify(out).slice(0, 1200);
 }
 
-/** Runtime ids look like gemini-*, claude-*, gpt-oss-*, never MODEL_PLACEHOLDER_* enums. */
+/** Runtime ids must not be internal placeholder enums, internal chats, or image endpoints. */
 export function isUsableRuntimeModelId(id: string): boolean {
-  return /^(gemini-|claude-|gpt-oss-)/i.test(id) && !/\s/.test(id) && !/^MODEL_/i.test(id);
+  return (
+    /^[a-z0-9][a-z0-9_.-]*$/i.test(id) &&
+    !/\s/.test(id) &&
+    !/^MODEL_/i.test(id) &&
+    !/^(chat_|tab_)/i.test(id) &&
+    !/image/i.test(id)
+  );
 }
 
 function buildModelMatchRegex(requestedId: string): RegExp {

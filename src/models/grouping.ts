@@ -55,15 +55,9 @@ const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 export function isSelectableRuntimeModelId(id: string, info?: ModelInfoRaw): boolean {
   if (!/^[a-z0-9][a-z0-9_.-]*$/i.test(id) || /^MODEL_/i.test(id)) return false;
-  // Opaque IDs can still be offered as-is when their display name identifies a
-  // supported chat family. Preserve their keys rather than inventing versioned IDs.
-  if (
-    !/^(gemini-|claude-|gpt-oss-)/i.test(id) &&
-    !/^(gemini|claude|gpt[- ]oss)\b/i.test(modelDisplayName(info) ?? "")
-  )
-    return false;
   if (/^(chat_|tab_)/i.test(id)) return false;
-  if (/image/i.test(id)) return false;
+  if (/image/i.test(id) || /image/i.test(modelDisplayName(info) ?? "")) return false;
+  if (info?.isInternal === true || info?.apiProvider === "API_PROVIDER_INTERNAL") return false;
   return true;
 }
 

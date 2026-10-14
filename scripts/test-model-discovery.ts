@@ -129,19 +129,25 @@ assert.equal(typeof updated.models[0].maxTokens, "number", "invalid limits use d
 const renamed = buildAntigravityCatalog(
   {
     "gemini-99-flash-ultra": info("Gemini 99 Flash Ultra"),
-    runtime_abc123: info("Claude Future"),
-    runtime_hidden: info("Gemini Internal", { isInternal: true }),
-    chat_hidden: info("Claude Hidden"),
+    runtime_abc123: info("Future Model"),
+    "mercury-99-flash-high": info("Mercury 99 Flash (High)"),
+    runtime_hidden: info("Internal Model", { isInternal: true }),
+    chat_hidden: info("Hidden chat"),
     "gemini-99-image": info("Gemini Image"),
   },
   fallback,
 );
-assert.equal(renamed.models.length, 2, "internal, chat, and image entries stay hidden");
+assert.equal(renamed.models.length, 3, "internal, chat, and image entries stay hidden");
 assert.equal(renamed.routing["gemini-99-flash-ultra"].defaultRequestId, "gemini-99-flash-ultra");
 assert.equal(
   renamed.routing.runtime_abc123.defaultRequestId,
   "runtime_abc123",
   "unfamiliar IDs remain exact runtime IDs",
+);
+assert.equal(
+  renamed.routing["mercury-99-flash"].routing?.high,
+  "mercury-99-flash-high",
+  "brand-agnostic model discovery discovers new families",
 );
 
 const aliases = buildAntigravityCatalog(
