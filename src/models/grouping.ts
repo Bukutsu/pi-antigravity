@@ -165,7 +165,7 @@ function absorbMetadata(
 
 function mergeAgentSingletons(groups: Map<string, RuntimeGroup>): void {
   for (const [publicId, group] of [...groups.entries()]) {
-    if (!publicId.endsWith("-agent")) continue;
+    if (!publicId.endsWith("-agent") || group.supportsThinking === false) continue;
     const runtimeIds = [group.unsuffixed, ...Object.values(group.variants)].filter(
       (id): id is string => id !== undefined,
     );
