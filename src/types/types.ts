@@ -251,6 +251,8 @@ export type QuotaSummaryRaw = {
 };
 
 export type ModelInfoRaw = {
+  maxTokens?: unknown;
+  maxOutputTokens?: unknown;
   isInternal?: unknown;
   displayName?: unknown;
   label?: unknown;

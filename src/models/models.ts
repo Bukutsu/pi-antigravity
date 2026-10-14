@@ -149,6 +149,9 @@ export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
 };
 
 export function getMaxOutputTokens(modelId: string, runtimeModel?: string): number {
+  // Refreshed (and restored) catalog limits take precedence over static defaults.
+  const discovered = currentModels.find((model) => model.id === modelId);
+  if (currentModels !== ANTIGRAVITY_MODELS && discovered) return discovered.maxTokens;
   if (runtimeModel && RUNTIME_MAX_OUTPUT_TOKENS[runtimeModel] !== undefined) {
     return RUNTIME_MAX_OUTPUT_TOKENS[runtimeModel];
   }

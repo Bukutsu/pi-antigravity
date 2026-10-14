@@ -435,7 +435,14 @@ export function mergeAvailableModelsResults(
   let lastStatus = 0;
 
   for (const result of results) {
-    if (!result) continue;
+    if (
+      !result ||
+      !isRecord(result.data) ||
+      !isRecord(result.data.models) ||
+      Object.keys(result.data.models).length === 0 ||
+      !Object.values(result.data.models).every(isRecord)
+    )
+      continue;
     setLastEndpoint(result.endpoint);
     setLastStatus(result.status);
     lastEndpoint = result.endpoint;
@@ -454,7 +461,9 @@ export function mergeAvailableModelsResults(
   }
 
   if (!lastEndpoint) {
-    throw new Error(`/v1internal:fetchAvailableModels failed: no endpoint available`);
+    throw new Error(
+      `/v1internal:fetchAvailableModels failed: no endpoint returned a valid non-empty catalog`,
+    );
   }
 
   return {
