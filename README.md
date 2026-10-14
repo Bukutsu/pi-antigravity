@@ -138,7 +138,9 @@ The native API returns in-memory image/text blocks and does not save files. Inpu
 
 After you sign in, the provider refreshes its catalog from Antigravity (`fetchAvailableModels`) and groups runtime thinking variants into public Pi model IDs. Newly enabled models — for example a new Gemini Flash generation — become selectable after that refresh without waiting for an extension release. A last-known-good cache is kept for offline/cold start; the static table below is only the conservative fallback and a routing reference.
 
-Use `/antigravity.models` to see live availability and quota for your account. Runtime names such as `gemini-3.8-flash-low` / `-medium` / `-high` collapse to `gemini-3.8-flash` with those thinking levels. The conservative static entries remain selectable when an account's authenticated catalog omits them.
+A successful refresh replaces the catalog with advertised models and routes, removing entries absent from all responding endpoints. Live capabilities and token limits override static defaults; grouped variants use the smallest advertised limits. Known thinking variants such as `gemini-3.8-flash-low` / `-medium` / `-high` become one public model. Unfamiliar suffixes and opaque IDs with recognized family names stay usable as exact runtime IDs.
+
+Use `/antigravity.refresh` to bypass the four-hour cache, or `/antigravity.models` to view live availability and quota. Account/project changes and older cache formats trigger discovery on the next network-enabled refresh. Failed or unrecognized responses keep the last-known-good catalog; forced refreshes report the error. Arbitrary API schema changes can still require an extension update.
 
 ### Why Claude and GPT-OSS appear
 
