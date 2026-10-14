@@ -11,7 +11,7 @@ import {
 } from "../diagnostics/diagnostics.js";
 import { assertSafeApiBaseUrl, safeError } from "../utils/security.js";
 import type { AntigravityApiKey, AvailableModelsRaw, DynamicModelInfo } from "../types/types.js";
-import { antigravityEnv, asString, escapeRegExp, isRecord } from "../utils/util.js";
+import { antigravityEnv, asString, isRecord } from "../utils/util.js";
 import { antigravityFetch } from "../utils/http.js";
 import { registerDiscoveredModelEnums, registerModelEnum } from "../models/models.js";
 
@@ -200,74 +200,6 @@ export function isUsableRuntimeModelId(id: string): boolean {
   );
 }
 
-function buildModelMatchRegex(requestedId: string): RegExp {
-  const req = requestedId.toLowerCase();
-  // Display names from fetchAvailableModels (keys are the real runtime ids):
-  //   gemini-3.8-flash-low       → "Gemini 3.8 Flash (Low)"
-  //   gemini-3.8-flash-medium    → "Gemini 3.8 Flash (Medium)"
-  //   gemini-3.8-flash-high      → "Gemini 3.8 Flash (High)"
-  //   gemini-3.7-flash-low       → "Gemini 3.7 Flash (Low)"
-  //   gemini-3.7-flash-medium    → "Gemini 3.7 Flash (Medium)"
-  //   gemini-3.7-flash-high      → "Gemini 3.7 Flash (High)"
-  //   gemini-3.6-flash-low       → "Gemini 3.6 Flash (Low)"
-  //   gemini-3.6-flash-medium    → "Gemini 3.6 Flash (Medium)"
-  //   gemini-3.6-flash-high      → "Gemini 3.6 Flash (High)"
-  //   gemini-3.5-flash-extra-low → "Gemini 3.5 Flash (Low)"
-  //   gemini-3.5-flash-low       → "Gemini 3.5 Flash (Medium)"
-  //   gemini-3-flash-agent       → "Gemini 3.5 Flash (High)"
-  if (req === "gemini-3.8-flash-low") return /gemini[- ]3\.8[- ]flash \(low\)/i;
-  if (req === "gemini-3.8-flash-medium") return /gemini[- ]3\.8[- ]flash \(medium\)/i;
-  if (req === "gemini-3.8-flash-high") return /gemini[- ]3\.8[- ]flash \(high\)/i;
-  if (req === "gemini-3.7-flash-low") return /gemini[- ]3\.7[- ]flash \(low\)/i;
-  if (req === "gemini-3.7-flash-medium") return /gemini[- ]3\.7[- ]flash \(medium\)/i;
-  if (req === "gemini-3.7-flash-high") return /gemini[- ]3\.7[- ]flash \(high\)/i;
-  if (req === "gemini-3.6-flash-low") return /gemini[- ]3\.6[- ]flash \(low\)/i;
-  if (req === "gemini-3.6-flash-medium") return /gemini[- ]3\.6[- ]flash \(medium\)/i;
-  if (req === "gemini-3.6-flash-high") return /gemini[- ]3\.6[- ]flash \(high\)/i;
-  if (req === "gemini-3.5-flash-extra-low") return /gemini[- ]3\.5[- ]flash \(low\)/i;
-  if (req === "gemini-3.5-flash-low" || req === "gemini-3.5-flash-medium")
-    return /gemini[- ]3\.5[- ]flash \(medium\)/i;
-  if (req === "gemini-3.5-flash-high" || req === "gemini-3-flash-agent")
-    return /gemini[- ]3\.5[- ]flash \(high\)/i;
-  if (req.includes("claude-opus-4-6")) return /claude.*opus.*4\.6/i;
-  if (req.includes("claude-sonnet-4-6")) return /claude.*sonnet.*4\.6/i;
-  if (req.includes("gpt-oss-120b")) return /gpt.*oss.*120b/i;
-  if (req === "gemini-3.1-pro-low") return /gemini[- ]3\.1[- ]pro \(low\)/i;
-  if (req === "gemini-3.1-pro-high" || req === "gemini-pro-agent")
-    return /gemini[- ]3\.1[- ]pro \(high\)/i;
-  const escaped = escapeRegExp(req).replace(/\\-/g, "[- ]");
-  return new RegExp(`^${escaped}$`, "i");
-}
-
-const LEGACY_ALIASES = new Set([
-  "gemini-3.8-flash-low",
-  "gemini-3.8-flash-medium",
-  "gemini-3.8-flash-high",
-  "gemini-3.7-flash-low",
-  "gemini-3.7-flash-medium",
-  "gemini-3.7-flash-high",
-  "gemini-3.6-flash-low",
-  "gemini-3.6-flash-medium",
-  "gemini-3.6-flash-high",
-  "gemini-3.5-flash-extra-low",
-  "gemini-3.5-flash-low",
-  "gemini-3.5-flash-medium",
-  "gemini-3.5-flash-high",
-  "gemini-3-flash-agent",
-  "gemini-3.1-pro-low",
-  "gemini-3.1-pro-high",
-  "gemini-pro-agent",
-  "claude-opus-4-6",
-  "claude-opus-4-6-thinking",
-  "claude-sonnet-4-6",
-  "gpt-oss-120b",
-  "gpt-oss-120b-medium",
-]);
-
-function hasLegacyAlias(requestedId: string): boolean {
-  return LEGACY_ALIASES.has(requestedId.toLowerCase());
-}
-
 function dynamicModelFromInfo(modelId: string, info: unknown): DynamicModelInfo {
   if (!isRecord(info)) return { id: modelId };
   setLastMatchedModelDebug(summarizeModelCandidate({ modelId, ...info }));
@@ -291,34 +223,32 @@ function dynamicModelFromInfo(modelId: string, info: unknown): DynamicModelInfo 
  * Resolve a requested runtime model against fetchAvailableModels payload.
  * The real runtime ids are the keys of `data.models`; the nested `model` field is often
  * a MODEL_PLACEHOLDER_* enum that 404s on streamGenerateContent.
+ *
+ * Uses deterministic key lookup (exact or case-insensitive) and exact display name match.
+ * Zero regexes, zero prefix wildcards, zero fuzzy guessing.
  */
 function findDynamicModel(value: unknown, requestedId: string): DynamicModelInfo | undefined {
   if (!value) return undefined;
 
   if (isRecord(value) && isRecord(value.models)) {
     const modelsMap = value.models;
+    // 1. Direct exact key lookup
     if (isUsableRuntimeModelId(requestedId) && requestedId in modelsMap) {
       return dynamicModelFromInfo(requestedId, modelsMap[requestedId]);
     }
+    // 2. Case-insensitive exact key lookup
     const lowerReq = requestedId.toLowerCase();
     for (const [modelId, info] of Object.entries(modelsMap)) {
       if (modelId.toLowerCase() === lowerReq && isUsableRuntimeModelId(modelId)) {
         return dynamicModelFromInfo(modelId, info);
       }
     }
-
-    // Opaque and non-alias IDs require exact-key matches to prevent near-miss prefix collisions.
-    if (!hasLegacyAlias(requestedId)) {
-      return undefined;
-    }
-
-    const targetRegex = buildModelMatchRegex(requestedId);
+    // 3. Exact display name lookup (for when a user references an exact model label)
     for (const [modelId, info] of Object.entries(modelsMap)) {
       if (!isUsableRuntimeModelId(modelId)) continue;
-      if (targetRegex.test(modelId)) return dynamicModelFromInfo(modelId, info);
       if (isRecord(info)) {
         const label = info.label ?? info.displayName ?? info.name;
-        if (typeof label === "string" && targetRegex.test(label)) {
+        if (typeof label === "string" && label.toLowerCase() === lowerReq) {
           return dynamicModelFromInfo(modelId, info);
         }
       }
@@ -326,10 +256,10 @@ function findDynamicModel(value: unknown, requestedId: string): DynamicModelInfo
     return undefined;
   }
 
-  const targetRegex = buildModelMatchRegex(requestedId);
-
   if (typeof value === "string") {
-    return targetRegex.test(value) && isUsableRuntimeModelId(value) ? { id: value } : undefined;
+    return value.toLowerCase() === requestedId.toLowerCase() && isUsableRuntimeModelId(value)
+      ? { id: value }
+      : undefined;
   }
   if (Array.isArray(value)) {
     for (const item of value) {
