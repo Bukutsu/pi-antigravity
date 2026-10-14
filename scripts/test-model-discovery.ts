@@ -148,6 +148,31 @@ assert.equal(
   "agent aliases follow current metadata, not pinned versions",
 );
 
+// Explicit capability denial must prevent an agent from becoming a thinking
+// route, even if its display name suggests High. Omitted metadata still merges.
+for (const supportsThinking of [false, true, undefined]) {
+  const grouped = buildAntigravityCatalog(
+    {
+      "gemini-101-pro-low": info("Gemini 101 Pro (Low)"),
+      "gemini-pro-agent": info("Gemini 101 Pro (High)", { supportsThinking }),
+    },
+    fallback,
+  );
+  const route = grouped.routing["gemini-101-pro"];
+  if (supportsThinking === false) {
+    assert.equal(grouped.models.length, 2);
+    assert.ok(grouped.routing["gemini-pro-agent"], "non-thinking agent stays separate");
+    assert.equal(
+      route.routing?.high,
+      "gemini-101-pro-low",
+      "explicitly non-thinking agent must not become the target's High route",
+    );
+  } else {
+    assert.equal(grouped.models.length, 1);
+    assert.equal(route.routing?.high, "gemini-pro-agent");
+  }
+}
+
 // Agent groups with multiple runtimes must remain independently routable,
 // including a group with both an unsuffixed runtime and a thinking variant.
 for (const agentModels of [
