@@ -499,4 +499,25 @@ try {
   globalThis.fetch = originalFetch;
 }
 
+// Unfamiliar suffix IDs (e.g. gemini-3.8-flash-ultra) must not fuzzy-match other models by display name or prefix.
+globalThis.fetch = async () =>
+  new Response(
+    JSON.stringify({
+      models: {
+        "gemini-3.8-flash-high": { displayName: "Gemini 3.8 Flash (High)" },
+      },
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  );
+try {
+  const match = await fetchAvailableRuntimeModel(
+    "test-token-ultra",
+    "test-proj",
+    "gemini-3.8-flash-ultra",
+  );
+  assert.equal(match, undefined, "unfamiliar suffix does not fuzzy match different models");
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
 console.log("model discovery: live metadata, routing, validation, persistence, and TTL passed");
