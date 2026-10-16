@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Refresh the Antigravity CLI user-agent fingerprint to 1.3.5 and invalidate old catalog cache so Gemini 4 Argon appears after upgrade.
+
 ## [0.10.0] - 2026-10-08
 
 ### Added

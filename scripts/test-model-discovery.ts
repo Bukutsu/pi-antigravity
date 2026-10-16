@@ -347,7 +347,10 @@ try {
 }
 
 // Account/project changes and older cache schemas bypass even a fresh TTL.
-for (const change of [{ credentialKey: "another-account" }, { schemaVersion: 0 }]) {
+for (const change of [
+  { credentialKey: "another-account" },
+  { schemaVersion: CATALOG_SCHEMA_VERSION - 1 },
+]) {
   networkCalled = false;
   globalThis.fetch = async () => {
     networkCalled = true;
