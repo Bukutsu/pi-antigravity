@@ -136,9 +136,13 @@ The native API returns in-memory image/text blocks and does not save files. Inpu
 
 ## Models and routing
 
-After you sign in, the provider refreshes its catalog from Antigravity (`fetchAvailableModels`) and groups runtime thinking variants into public Pi model IDs. Newly enabled models — for example a new Gemini Flash generation — become selectable after that refresh without waiting for an extension release. A last-known-good cache is kept for offline/cold start; the static table below is only the conservative fallback and a routing reference.
+After you sign in, the provider refreshes its catalog from Antigravity (`fetchAvailableModels`) and groups runtime thinking variants into public Pi model IDs. Newly enabled models — for example Gemini 4 Argon or a new Gemini Flash generation — become selectable after that refresh without waiting for an extension release. A last-known-good cache is kept for offline/cold start; the static table below is only the conservative fallback and a routing reference.
 
-Use `/antigravity.models` to see live availability and quota for your account. Runtime names such as `gemini-3.8-flash-low` / `-medium` / `-high` collapse to `gemini-3.8-flash` with those thinking levels. The conservative static entries remain selectable when an account's authenticated catalog omits them.
+Gemini 4 Argon is advertised only when the client version is current and the account is entitled. After upgrading, run `/antigravity.refresh` (or start any session; print mode refreshes before the prompt) and select `antigravity/gemini-4-argon`. Updating the client version does not grant entitlement. Headless `pi -p` resolves `--model` before extensions run, so the first invocation after an upgrade can still print `Using custom model id`; the request is routed from the refreshed catalog, and the next invocation reads the persisted list.
+
+A successful refresh replaces the catalog with advertised models and routes, removing entries absent from all responding endpoints. Live capabilities and token limits override static defaults; grouped variants use the smallest advertised limits. Known thinking variants such as `gemini-3.8-flash-low` / `-medium` / `-high` become one public model. Unfamiliar suffixes and opaque IDs stay usable as exact runtime IDs when they pass the catalog filters.
+
+Use `/antigravity.refresh` to bypass the four-hour cache, or `/antigravity.models` to view live availability and quota. Account/project changes and older cache formats trigger discovery on the next network-enabled refresh. Failed or unrecognized responses keep the last-known-good catalog; forced refreshes report the error. Arbitrary API schema changes can still require an extension update. `ANTIGRAVITY_USER_AGENT` overrides the default client fingerprint when a newer CLI version is required.
 
 ### Why Claude and GPT-OSS appear
 

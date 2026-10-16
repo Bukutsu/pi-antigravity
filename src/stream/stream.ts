@@ -18,17 +18,22 @@ import {
   endpointCandidates,
   fetchAvailableRuntimeModel,
   formatRequestDiagnostics,
+  isUsableRuntimeModelId,
   jsonOrTextError,
   loadCodeAssist,
   parseApiKey,
   resolveProjectId,
 } from "../client/client.js";
 import {
+  getCurrentAvailableModels,
   getCurrentEndpoint,
+  getCurrentMatchedModelDebug,
   runWithDiagnostics,
+  setLastAvailableModels,
   setLastEndpoint,
   setLastError,
   setLastLatencyMs,
+  setLastMatchedModelDebug,
   setLastProjectId,
   setLastResolvedRuntimeModel,
   setLastStatus,
@@ -992,6 +997,40 @@ export function mapStopReason(reason: string | undefined): StopReason {
   return reason ? StopReason.Error : StopReason.Stop;
 }
 
+/** Account quota walls. These must stay non-retryable and may fail over to another login. */
+function isAccountQuota429(text: string): boolean {
+  return (
+    /Individual quota reached/i.test(text) ||
+    /Resets? in /i.test(text) ||
+    (!/rate.?limit/i.test(text) && /quota exceeded|exceeded your|daily limit/i.test(text))
+  );
+}
+
+/** Short throttles. Pi retries these; persistent model unavailability must not match. */
+function isRetryableRateLimit(text: string): boolean {
+  return /rate.?limit|too many requests/i.test(text);
+}
+
+/**
+ * Keep the numeric status out of non-retryable errors. Pi treats the digits 429 as a
+ * retryable provider error even when the friendly text says the model is unavailable.
+ */
+function publicErrorStatus(status: number | undefined, friendly: string): string {
+  if (status === undefined) return "no response";
+  return /retrying automatically/i.test(friendly) ? String(status) : "request-failed";
+}
+
+/** Record a static route so doctor output is not matched=none on models that skip discovery. */
+function recordStaticRouteDiagnostics(runtimeModel: string): void {
+  if (!getCurrentMatchedModelDebug()) {
+    setLastMatchedModelDebug(`static:${runtimeModel}`);
+  }
+  if (!getCurrentAvailableModels()) {
+    const ids = Object.keys(getCurrentAntigravityRouting());
+    setLastAvailableModels(ids.length > 0 ? ids.join(",") : "static-catalog");
+  }
+}
+
 /** Exported for unit tests. */
 export function friendlyAntigravityError(status: number | undefined, text: string): string {
   const msg = redactSecrets(jsonOrTextError(text)).slice(0, 500);
@@ -1058,7 +1097,13 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
     if (hardLimit) {
       return `Quota reached.${wait ? ` Please wait ${wait}.` : ""} Next: switch models or retry later.`;
     }
-    return "Rate limited by Antigravity (429 ResourceExhausted). Next: retrying automatically; if it persists, switch models.";
+    if (/rate.?limit|too many requests/i.test(msg)) {
+      return "Rate limited by Antigravity (429 ResourceExhausted). Next: retrying automatically; if it persists, switch models.";
+    }
+    // A generic RESOURCE_EXHAUSTED body, with no reset hint, is how unavailable models
+    // such as gemini-3.1-pro fail (#89). Do not include 429/ResourceExhausted: those
+    // tokens make Pi burn its automatic retry budget and look like an account quota wall.
+    return `This model is unavailable right now (${msg || "resource exhausted"}). Next: switch to gemini-3.8-flash or another Flash model. This is not necessarily an account quota wall.`;
   }
   if (status === 500) {
     return "Antigravity had an internal server error. Next: retry in a moment or switch models.";
@@ -1501,7 +1546,7 @@ export function streamAntigravity(
       // Dynamic lookup is only needed for unmapped custom models.
       if (!isKnownModel && !antigravityEnv("RUNTIME_MODEL")) {
         const dynamic = await fetchAvailableRuntimeModel(creds.token, projectId, baseRuntimeModel);
-        if (dynamic?.id && /^(gemini-|claude-|gpt-oss-)/i.test(dynamic.id)) {
+        if (dynamic?.id && isUsableRuntimeModelId(dynamic.id)) {
           initialRuntimeModel = dynamic.id;
         }
       }
@@ -1529,6 +1574,7 @@ export function streamAntigravity(
         for (let candIdx = 0; candIdx < runtimeCandidates.length; candIdx++) {
           runtimeModel = runtimeCandidates[candIdx]!;
           setLastResolvedRuntimeModel(runtimeModel);
+          recordStaticRouteDiagnostics(runtimeModel);
           const body = JSON.stringify(buildRequest(model, context, projectId, opts, runtimeModel));
 
           for (const endpoint of endpointCandidates()) {
@@ -1547,15 +1593,9 @@ export function streamAntigravity(
             setLastStatus(response.status);
             if (response.ok) break;
             lastText = await response.text();
-            if (
-              response.status === 429 &&
-              (/Individual quota reached/i.test(lastText) ||
-                /Resets? in /i.test(lastText) ||
-                (!/rate.?limit/i.test(lastText) &&
-                  /quota exceeded|exceeded your|daily limit/i.test(lastText)))
-            ) {
-              break;
-            }
+            if (response.status === 429 && isAccountQuota429(lastText)) break;
+            // Generic resource exhaustion is a dead model, not a reason to walk every endpoint.
+            if (response.status === 429 && !isRetryableRateLimit(lastText)) break;
             if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break;
           }
 
@@ -1573,7 +1613,7 @@ export function streamAntigravity(
               if (
                 dynamic?.id &&
                 !runtimeCandidates.includes(dynamic.id) &&
-                /^(gemini-|claude-|gpt-oss-)/i.test(dynamic.id)
+                isUsableRuntimeModelId(dynamic.id)
               ) {
                 runtimeCandidates.push(dynamic.id);
                 continue;
@@ -1634,7 +1674,7 @@ export function streamAntigravity(
             throw new Error(friendly);
           }
           throw new Error(
-            `Antigravity API error (${response?.status ?? "no response"}, ${formatRequestDiagnostics({ projectId, runtimeModel })}): ${friendly}`,
+            `Antigravity API error (${publicErrorStatus(response?.status, friendly)}, ${formatRequestDiagnostics({ projectId, runtimeModel })}): ${friendly}`,
           );
         }
 

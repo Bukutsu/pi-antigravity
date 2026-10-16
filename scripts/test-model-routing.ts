@@ -630,9 +630,9 @@ assert.match(
   friendlyAntigravityError(429, "Individual quota reached. Resets in 1h"),
   /Quota reached/,
 );
-// Issue #49: transient 429 with generic "Resource has been exhausted (e.g. check quota)."
-// must be classified as rate limited with retryable tokens (429, ResourceExhausted) so Pi retries.
-const transient429Error = friendlyAntigravityError(
+// Issue #89: generic RESOURCE_EXHAUSTED without a reset hint is an unavailable model,
+// not a short throttle. It must not carry the tokens Pi uses to retry automatically.
+const unavailable429Error = friendlyAntigravityError(
   429,
   JSON.stringify({
     error: {
@@ -642,9 +642,12 @@ const transient429Error = friendlyAntigravityError(
     },
   }),
 );
-assert.ok(!/Quota reached/i.test(transient429Error), "transient 429 must not be classified as Quota reached");
-assert.match(transient429Error, /Rate limited by Antigravity \(429 ResourceExhausted\)/);
-assert.match(transient429Error, /retrying automatically/);
+assert.ok(!/Quota reached/i.test(unavailable429Error), "generic 429 must not be classified as Quota reached");
+assert.match(unavailable429Error, /unavailable right now/);
+assert.match(unavailable429Error, /Resource has been exhausted/);
+assert.match(unavailable429Error, /gemini-3\.8-flash/);
+assert.ok(!/ResourceExhausted/.test(unavailable429Error), "must not mark a dead model as retryable");
+assert.ok(!/\b429\b/.test(unavailable429Error), "numeric 429 would make Pi retry the dead model");
 
 // Real quota walls must remain non-retryable Quota reached
 const quotaResetError = friendlyAntigravityError(
@@ -673,10 +676,10 @@ assert.equal(
   isRetryableAssistantError({
     role: "assistant",
     stopReason: "error",
-    errorMessage: transient429Error,
+    errorMessage: unavailable429Error,
   } as unknown as Parameters<typeof isRetryableAssistantError>[0]),
-  true,
-  "transient 429 must be retryable by Pi",
+  false,
+  "generic resource exhaustion must not be retryable by Pi",
 );
 assert.equal(
   isRetryableAssistantError({
@@ -1433,7 +1436,7 @@ assert.equal(opusCost?.output, 75);
 // Wire fingerprint: User-Agent format (pure agy CLI)
 assert.equal(
   defaultUserAgent(),
-  "antigravity/cli/1.2.4 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)",
+  "antigravity/cli/1.3.7 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)",
 );
 
 // Wire fingerprint: Headers hygiene & environment isolation
