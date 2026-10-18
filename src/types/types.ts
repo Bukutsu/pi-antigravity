@@ -222,6 +222,7 @@ export type AccountUsage = {
   quotaSummaryError?: string;
   models: ModelQuotaRow[];
   defaultAgentModelId?: string;
+  agentModelSorts?: unknown;
   fetchedAt: number;
 };
 
@@ -269,10 +270,20 @@ export type ModelInfoRaw = {
   };
 };
 
+export type AgentModelSortGroup = {
+  modelIds?: unknown;
+};
+
+export type AgentModelSort = {
+  displayName?: unknown;
+  groups?: AgentModelSortGroup[];
+};
+
 export type AvailableModelsRaw = {
   models?: Record<string, ModelInfoRaw>;
   defaultAgentModelId?: unknown;
   defaultAgentModel?: unknown;
+  agentModelSorts?: AgentModelSort[];
 };
 
 export type TierRaw = {

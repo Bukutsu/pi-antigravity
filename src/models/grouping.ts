@@ -1,6 +1,7 @@
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { ThinkingEffort } from "../types/enums.js";
 import type { AntigravityRouting, ModelInfoRaw } from "../types/types.js";
+import { isRecord } from "../utils/util.js";
 
 export type AntigravityCatalog = {
   models: ProviderModelConfig[];
@@ -69,36 +70,64 @@ export function resolvedCatalog(
   return current;
 }
 
+export function extractRecommendedModelIds(agentModelSorts: unknown): Set<string> | undefined {
+  if (!Array.isArray(agentModelSorts) || agentModelSorts.length === 0) return undefined;
+  const ids = new Set<string>();
+  for (const sort of agentModelSorts) {
+    if (!isRecord(sort)) continue;
+    const groups = Array.isArray(sort.groups) ? sort.groups : [];
+    for (const group of groups) {
+      if (!isRecord(group) || !Array.isArray(group.modelIds)) continue;
+      for (const id of group.modelIds) {
+        if (typeof id === "string" && id) ids.add(id);
+      }
+    }
+  }
+  return ids.size > 0 ? ids : undefined;
+}
+
 export function buildAntigravityCatalog(
   rawModels: Record<string, ModelInfoRaw>,
   fallback: AntigravityCatalog,
+  agentModelSorts?: unknown,
 ): AntigravityCatalog {
-  const groups = new Map<string, RuntimeGroup>();
+  const recommendedIds = extractRecommendedModelIds(agentModelSorts);
 
-  for (const [runtimeId, info] of Object.entries(rawModels)) {
-    if (!isSelectableRuntimeModelId(runtimeId, info)) continue;
-    if (info?.isInternal) continue;
+  function collectGroups(filterIds?: Set<string>): Map<string, RuntimeGroup> {
+    const collected = new Map<string, RuntimeGroup>();
 
-    const displayName = modelDisplayName(info);
-    if (runtimeId.endsWith("-tiered")) {
-      const baseId = runtimeId.slice(0, -"-tiered".length);
-      const group = ensureGroup(groups, baseId);
+    for (const [runtimeId, info] of Object.entries(rawModels)) {
+      if (!isSelectableRuntimeModelId(runtimeId, info)) continue;
+      if (info?.isInternal) continue;
+      if (filterIds && !filterIds.has(runtimeId)) continue;
+
+      const displayName = modelDisplayName(info);
+      if (runtimeId.endsWith("-tiered")) {
+        const baseId = runtimeId.slice(0, -"-tiered".length);
+        const group = ensureGroup(collected, baseId);
+        absorbMetadata(group, info, displayName);
+        if (!group.unsuffixed) group.unsuffixed = runtimeId;
+        continue;
+      }
+
+      const suffix = parseThinkingSuffix(runtimeId);
+      const publicId = suffix?.baseId ?? runtimeId;
+      const group = ensureGroup(collected, publicId);
       absorbMetadata(group, info, displayName);
-      if (!group.unsuffixed) group.unsuffixed = runtimeId;
-      continue;
+
+      const level = levelFromDisplayName(displayName) ?? suffix?.level;
+      if (level) group.variants[level] = runtimeId;
+      else group.unsuffixed = runtimeId;
     }
 
-    const suffix = parseThinkingSuffix(runtimeId);
-    const publicId = suffix?.baseId ?? runtimeId;
-    const group = ensureGroup(groups, publicId);
-    absorbMetadata(group, info, displayName);
-
-    const level = levelFromDisplayName(displayName) ?? suffix?.level;
-    if (level) group.variants[level] = runtimeId;
-    else group.unsuffixed = runtimeId;
+    mergeAgentSingletons(collected);
+    return collected;
   }
 
-  mergeAgentSingletons(groups);
+  let groups = collectGroups(recommendedIds);
+  if (groups.size === 0 && recommendedIds) {
+    groups = collectGroups();
+  }
 
   if (groups.size === 0) throw new Error("Antigravity catalog contains no supported chat models");
 

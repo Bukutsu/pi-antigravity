@@ -18,6 +18,7 @@ import {
   applyAntigravityCatalog,
   buildAntigravityCatalog,
   clearModelEnumCache,
+  extractRecommendedModelIds,
   getAntigravityRequestModelId,
   getFallbackRuntimeModel,
   getModelEnum,
@@ -603,5 +604,61 @@ try {
   resetAntigravityCatalogForTests();
   clearModelEnumCache();
 }
+
+// Curation via agentModelSorts (#97): active models prioritized, retired routes hidden
+const sortsPayload = [
+  {
+    displayName: "Recommended",
+    groups: [
+      {
+        modelIds: [
+          "gemini-4-argon-medium",
+          "gemini-4-argon-high",
+          "gemini-4-argon-low",
+          "gemini-3.8-flash-high",
+          "gemini-3.8-flash-medium",
+          "gemini-3.8-flash-low",
+        ],
+      },
+    ],
+  },
+];
+const recommendedSet = extractRecommendedModelIds(sortsPayload);
+assert.equal(recommendedSet?.size, 6);
+assert.ok(recommendedSet?.has("gemini-4-argon-medium"));
+assert.equal(extractRecommendedModelIds(undefined), undefined);
+assert.equal(extractRecommendedModelIds([]), undefined);
+
+const mixedRawModels: Record<string, ModelInfoRaw> = {
+  "gemini-4-argon-low": info("Gemini 4 Argon (Low)"),
+  "gemini-4-argon-medium": info("Gemini 4 Argon (Medium)"),
+  "gemini-4-argon-high": info("Gemini 4 Argon (High)"),
+  "gemini-3.8-flash-low": info("Gemini 3.8 Flash (Low)"),
+  "gemini-3.8-flash-medium": info("Gemini 3.8 Flash (Medium)"),
+  "gemini-3.8-flash-high": info("Gemini 3.8 Flash (High)"),
+  "gemini-pro-agent": info("Gemini Pro Agent (High)"),
+  "gemini-2.5-flash-low": info("Gemini 2.5 Flash (Low)"),
+  "gemini-3.1-pro-low": info("Gemini 3.1 Pro (Low)"),
+};
+
+const curatedCatalog = buildAntigravityCatalog(mixedRawModels, fallback, sortsPayload);
+const curatedIds = curatedCatalog.models.map((m) => m.id);
+assert.deepEqual(curatedIds.sort(), ["gemini-3.8-flash", "gemini-4-argon"].sort());
+assert.ok(!curatedCatalog.routing["gemini-pro-agent"], "hides retired gemini-pro-agent");
+assert.ok(!curatedCatalog.routing["gemini-2.5-flash"], "hides retired 2.5 variants");
+assert.ok(!curatedCatalog.routing["gemini-3.1-pro"], "hides retired 3.1 variants");
+
+// MergeAvailableModels carries agentModelSorts through
+const mergedWithSorts = mergeAvailableModelsResults([
+  {
+    endpoint: "https://cloudcode-pa.googleapis.com",
+    status: 200,
+    data: {
+      models: { "gemini-4-argon-low": info("Gemini 4 Argon (Low)") },
+      agentModelSorts: sortsPayload,
+    },
+  },
+]);
+assert.deepEqual(mergedWithSorts.data.agentModelSorts, sortsPayload);
 
 console.log("model discovery: live metadata, routing, validation, persistence, and TTL passed");

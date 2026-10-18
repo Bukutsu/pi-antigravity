@@ -61,9 +61,9 @@ export function endpointCandidates(): string[] {
 }
 
 // Catalog visibility is gated on this version. 1.2.4 hides Gemini 4 Argon;
-// 1.3.x is the verified floor that still returns entitled models (#93, #94).
+// 1.4.0 is aligned with the current official agy CLI release (#93, #94, #97).
 const DEFAULT_USER_AGENT =
-  "antigravity/cli/1.3.7 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)";
+  "antigravity/cli/1.4.0 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)";
 
 /** Default User-Agent matching pure Antigravity CLI wire fingerprint. */
 export function defaultUserAgent(): string {
@@ -409,6 +409,7 @@ export function mergeAvailableModelsResults(
   const mergedModels: Record<string, unknown> = {};
   let defaultAgentModelId: string | undefined;
   let defaultAgentModel: string | undefined;
+  let agentModelSorts: AvailableModelsRaw["agentModelSorts"];
   let lastEndpoint = "";
   let lastStatus = 0;
 
@@ -436,6 +437,9 @@ export function mergeAvailableModelsResults(
     if (isRecord(data) && typeof data.defaultAgentModel === "string") {
       defaultAgentModel = data.defaultAgentModel;
     }
+    if (isRecord(data) && Array.isArray(data.agentModelSorts)) {
+      agentModelSorts = data.agentModelSorts as AvailableModelsRaw["agentModelSorts"];
+    }
   }
 
   if (!lastEndpoint) {
@@ -451,6 +455,7 @@ export function mergeAvailableModelsResults(
       models: mergedModels as AvailableModelsRaw["models"],
       defaultAgentModelId,
       defaultAgentModel,
+      agentModelSorts,
     },
   };
 }

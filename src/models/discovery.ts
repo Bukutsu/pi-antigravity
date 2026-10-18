@@ -73,7 +73,7 @@ export async function discoverAntigravityModels(
     throw new Error("Antigravity returned an empty or unrecognized model catalog");
   }
   registerDiscoveredModelEnums(models);
-  return buildAntigravityCatalog(models, fallbackCatalog());
+  return buildAntigravityCatalog(models, fallbackCatalog(), available.data.agentModelSorts);
 }
 
 export async function refreshAntigravityModels(
