@@ -23,6 +23,11 @@ import { getLastDiagnostics, runWithDiagnostics } from "./diagnostics/index.js";
 import { generateAntigravityImage, parseImageCommandArgs } from "./image/index.js";
 import { executeAntigravitySearch, parseSearchCommandArgs } from "./search/index.js";
 import {
+  executeAntigravityWebFetch,
+  formatWebFetchResult,
+  parseFetchCommandArgs,
+} from "./web-fetch/index.js";
+import {
   applyAntigravityCatalog,
   discoverAntigravityModels,
   getCurrentAntigravityCatalog,
@@ -316,7 +321,7 @@ export default function (pi: ExtensionAPI): void {
         `lastError=${d.error ? redactSecrets(d.error) : "none"}`,
         "transport=native-streamSimple",
         "runtimeCli=not-used",
-        "commands=/antigravity.usage /antigravity.models /antigravity.accounts /antigravity.refresh /antigravity.doctor /antigravity.image /antigravity.search",
+        "commands=/antigravity.usage /antigravity.models /antigravity.accounts /antigravity.refresh /antigravity.doctor /antigravity.image /antigravity.search /antigravity.fetch",
       ];
       emitCommandOutput(ctx, `Antigravity doctor\n${lines.join("\n")}`);
     },
@@ -396,6 +401,39 @@ export default function (pi: ExtensionAPI): void {
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         emitCommandOutput(ctx, `Antigravity search failed: ${redactSecrets(msg)}`, "warning");
+      }
+    },
+  });
+
+  pi.registerCommand("antigravity.fetch", {
+    description:
+      "Read a public web page via the Antigravity crawler (usage: /antigravity.fetch [--raw] <url>)",
+    handler: async (args, ctx) => {
+      const parsed = parseFetchCommandArgs(args || "");
+      if (!parsed.url) {
+        emitCommandOutput(ctx, "Usage: /antigravity.fetch [--raw] <url>", "warning");
+        return;
+      }
+      try {
+        const apiKey = await resolveApiKeyFromContext(ctx);
+        if (!apiKey) {
+          emitCommandOutput(
+            ctx,
+            "No Antigravity credentials. Run /login antigravity first.",
+            "warning",
+          );
+          return;
+        }
+        if (ctx.hasUI) ctx.ui.notify("Reading page via Antigravity…", "info");
+        const result = await executeAntigravityWebFetch({
+          apiKey,
+          url: parsed.url,
+          raw: parsed.raw,
+        });
+        emitCommandOutput(ctx, formatWebFetchResult(result));
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        emitCommandOutput(ctx, `Antigravity fetch failed: ${redactSecrets(msg)}`, "warning");
       }
     },
   });

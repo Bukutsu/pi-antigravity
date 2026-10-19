@@ -112,12 +112,15 @@ Review these permissions before approving access. If your credentials expire or 
 | `/antigravity.doctor` | Show sanitized provider diagnostics, including the endpoint, status, and resolved runtime model. |
 | `/antigravity.image <prompt>` | Generate an image via Antigravity and save it under `.pi/generated-images/`. Optional `--ratio 16:9`, `--model`, `--path`. |
 | `/antigravity.search <query>` | Search the web using Google Search Grounding via Antigravity. Optional `--thinking`, `--url <url>`. |
+| `/antigravity.fetch <url>` | Read a public web page through the Antigravity fetch service and print it as markdown. Optional `--raw` keeps the crawled source. |
 
 Model availability, entitlement, quota groups, and resets are returned by the service and can differ by account. The quota percentage shown for a model can represent a shared pool, not a private per-model allowance.
 
 The extension also registers a `generate_image` tool the model can call. Images are written inside the project directory (default `.pi/generated-images/`). Image generation defaults to `gemini-3.1-flash-image`; model availability is account-dependent. Requests use the direct image endpoint, with the legacy streaming endpoint tried on HTTP 404. Existing model and endpoint fallbacks remain available.
 
 It also registers a `google_search` tool allowing models to perform real-time web search and URL analysis using Google Search Grounding over Cloud Code Assist. The default model is `gemini-3.5-flash-lite` (fallbacks: `gemini-3.1-flash-lite`, `gemini-3-flash`) and the default reply is a short evidence brief. It supports optional lead agent directives (`instruction`), specific target URLs (`urls`), and deep reasoning (`thinking: true` or `/antigravity.search --thinking`).
+
+It also registers a `read_url_content` tool that reads a public page through the same server-side fetch service behind the official `agy` tool of that name. The crawl runs on Google's side, so the machine never contacts the target site — only the Cloud Code Assist endpoint. The provider calls `v1internal:rewriteUri` to resolve redirects, then `v1internal:fetchFromTrawlerCache` for a cached copy, and repeats that call with `liveFetch: true` when the cache misses. The crawler returns raw HTML, which the tool converts to markdown, trims to `ANTIGRAVITY_WEB_FETCH_MAX_CHARS` characters (default 60000), and heads with the page title, description, and source URL. Private, local, and non-HTTP addresses are refused up front. The tool has no JavaScript, cookies, or authentication, so pages behind a login need a real browser.
 
 ### Native image API
 
@@ -194,11 +197,13 @@ All primary environment variables start with `ANTIGRAVITY_`. The legacy `NOAGY_`
 | `ANTIGRAVITY_CLIENT_SECRET` | Use a custom Google OAuth client secret. Keep it out of source control and shell history. |
 | `ANTIGRAVITY_NO_KEEPALIVE` | Set to `1` to skip the keep-alive connection pool. |
 | `ANTIGRAVITY_NO_PREWARM` | Set to `1` to skip the TLS pre-warm request made on the first Antigravity request. |
-| `ANTIGRAVITY_NO_EXTRA_TOOLS` | Set to `1` to stop registering the model-facing `google_search` and `generate_image` tools. The `/antigravity.search` and `/antigravity.image` commands stay available. |
+| `ANTIGRAVITY_NO_EXTRA_TOOLS` | Set to `1` to stop registering the model-facing `google_search`, `read_url_content`, and `generate_image` tools. The `/antigravity.search`, `/antigravity.fetch`, and `/antigravity.image` commands stay available. |
 | `ANTIGRAVITY_NO_SEARCH_TOOL` | Set to `1` to skip only the `google_search` tool, e.g. when another extension provides web search. |
+| `ANTIGRAVITY_NO_FETCH_TOOL` | Set to `1` to skip only the `read_url_content` tool, e.g. when another extension already fetches URLs. |
 | `ANTIGRAVITY_NO_IMAGE_TOOL` | Set to `1` to skip only the `generate_image` tool. |
+| `ANTIGRAVITY_WEB_FETCH_MAX_CHARS` | Character budget for one `read_url_content` result. Defaults to 60000, roughly 15k tokens. |
 
-`pi config` can disable each model-facing tool without disabling the provider. The package loads three extension resources: `src/index.ts` (provider, OAuth, and slash commands), `src/features/google-search.ts` (`google_search`), and `src/features/generate-image.ts` (`generate_image`). Turn off a feature resource there to stop registering that tool. `/antigravity.search` and `/antigravity.image` stay available from the provider extension.
+`pi config` can disable each model-facing tool without disabling the provider. The package loads four extension resources: `src/index.ts` (provider, OAuth, and slash commands), `src/features/google-search.ts` (`google_search`), `src/features/read-url-content.ts` (`read_url_content`), and `src/features/generate-image.ts` (`generate_image`). Turn off a feature resource there to stop registering that tool. `/antigravity.search`, `/antigravity.fetch`, and `/antigravity.image` stay available from the provider extension.
 
 Environment variables still force a loaded tool off, including in scripts and headless runs. They cannot turn a resource back on after `pi config` disables it, because that file is not loaded. Either control is enough to hide the tool from the model. Run `/reload` after changing `pi config` or the environment in an active session; a new Pi process also picks the change up. A restart is not required when `/reload` succeeds.
 

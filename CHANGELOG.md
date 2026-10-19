@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`read_url_content` tool:** Reads a public page through the same server-side fetch service the official `agy` CLI uses. The provider calls `v1internal:rewriteUri` to resolve redirects, `v1internal:fetchFromTrawlerCache` for a cached copy, and the same call with `liveFetch: true` when the cache misses, then converts the crawled HTML to markdown with a title, description, and source header. Private and local addresses are refused before the request, and results are capped by `ANTIGRAVITY_WEB_FETCH_MAX_CHARS` (default 60000). Disable with `ANTIGRAVITY_NO_FETCH_TOOL=1`, `ANTIGRAVITY_NO_EXTRA_TOOLS=1`, or the `read-url-content` resource in `pi config`. `/antigravity.fetch [--raw] <url>` exposes the same fetch for interactive use.
+
 ## [0.11.0] - 2026-10-16
 
 ### Added
