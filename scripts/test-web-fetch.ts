@@ -1,4 +1,6 @@
 import strictAssert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
 import {
   buildRewriteUriRequest,
   buildTrawlerFetchRequest,
@@ -60,6 +62,12 @@ function mockFetch(
     return handler(url, init ?? {});
   }) as typeof fetch;
   return { calls };
+}
+
+/** Read one saved page copy; see scripts/fixtures/web-fetch/README.md. */
+function sample(name: string): string {
+  const path = new URL(`./fixtures/web-fetch/${name}`, import.meta.url);
+  return gunzipSync(readFileSync(path)).toString("utf8");
 }
 
 /** Cover URL guards, the two RPC shapes, cache and live paths, and HTML conversion. */
@@ -192,6 +200,70 @@ async function main() {
   assert(
     image.includes("![Logo \\[v2\\] & more](https://example.com/img/logo%20(1%29.png)"),
     `image label and destination escaped (got ${image})`,
+  );
+
+  // Navigation and footers leave even when they are nested, and a truncated copy ends
+  // inside one rather than after it.
+  const nested = htmlToMarkdown(
+    "<html><body><nav>outer<nav>inner</nav>tail</nav><div>Keep this</div></body></html>",
+  );
+  assert(
+    !nested.includes("outer") && !nested.includes("inner") && !nested.includes("tail"),
+    `nested navigation dropped whole (got ${nested})`,
+  );
+  assert(nested.includes("Keep this"), "content after navigation kept");
+  const cutOff = htmlToMarkdown("<html><body><nav>menu<a href='/a'>A</a>", {
+    baseUrl: "https://example.com/",
+  });
+  assert(
+    !cutOff.includes("menu") && !cutOff.includes("[A]"),
+    `copy cut inside chrome drops that chrome (got ${cutOff})`,
+  );
+
+  // The page's own content region wins over the masthead and footer around it.
+  const region = htmlToMarkdown(
+    "<html><body><header>Site name</header><main><h1>Article</h1><p>Body text</p></main><footer>Contact</footer></body></html>",
+  );
+  assert(region.includes("# Article") && region.includes("Body text"), "main content kept");
+  assert(
+    !region.includes("Site name") && !region.includes("Contact"),
+    `chrome outside main dropped (got ${region})`,
+  );
+  const noRegion = htmlToMarkdown(
+    "<html><body><p>Plain page</p><footer>Footer text</footer></body></html>",
+  );
+  assert(
+    noRegion.includes("Plain page") && !noRegion.includes("Footer text"),
+    `pages without main still lose their chrome (got ${noRegion})`,
+  );
+
+  // Links that only wrap an image stay images, and URL labels are not repeated.
+  const linkedImage = htmlToMarkdown('<a href="/page"><img src="/pic.png" alt="Pic"></a>', {
+    baseUrl: "https://example.com/",
+  });
+  assert(linkedImage === "![Pic](https://example.com/pic.png)", `image link unwrapped (got ${linkedImage})`);
+  const urlLabel = htmlToMarkdown('<a href="https://example.com/x">https://example.com/x</a>');
+  assert(urlLabel === "https://example.com/x", `URL label not repeated (got ${urlLabel})`);
+
+  // List items sit on consecutive lines instead of every other line.
+  const items = htmlToMarkdown("<ul>\n<li>one</li>\n<li>two</li>\n</ul>");
+  assert(items === "- one\n- two", `list items joined (got ${JSON.stringify(items)})`);
+
+  // A table that labels its rows further down gets an empty header instead of
+  // promoting a data row, and a plain table keeps its first row as the header.
+  const labels = htmlToMarkdown(
+    "<table><tr><td>Names</td><td>Artemis II</td></tr><tr><th>Mission type</th><td>Flyby</td></tr></table>",
+  );
+  assert(
+    labels.includes("|  |  |") && labels.includes("| Names | Artemis II |"),
+    `label tables get an empty header (got ${JSON.stringify(labels)})`,
+  );
+  const plainTable = htmlToMarkdown(
+    "<table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>",
+  );
+  assert(
+    plainTable.includes("| a | b |\n| --- | --- |\n| c | d |"),
+    `plain tables keep their first row as the header (got ${JSON.stringify(plainTable)})`,
   );
 
   // 7. Cache hit: one RPC, no live fetch
@@ -389,6 +461,166 @@ async function main() {
       raw: true,
     });
     assert(raw.content.includes("<script>"), "raw mode still returns HTML that renders to nothing");
+  }
+
+  // 14. Representative saved pages (see scripts/fixtures/web-fetch/README.md)
+  {
+    // IANA registry: the table is the page, so no row may be lost or flattened.
+    const ianaUrl = "https://www.iana.org/assignments/http-status-codes/http-status-codes.xhtml";
+    const iana = sample("iana-http-status-codes.xhtml.gz");
+    const ianaMd = htmlToMarkdown(iana, { baseUrl: ianaUrl });
+    const ianaMeta = extractPageMetadata(iana);
+    assert(
+      ianaMeta.title === "Hypertext Transfer Protocol (HTTP) Status Code Registry",
+      `IANA registry title (got ${ianaMeta.title})`,
+    );
+    assert(ianaMeta.updated === undefined, "no update date is invented for the IANA registry");
+    assert(ianaMd.includes("| Value | Description | Reference |"), "IANA header row kept");
+    assert(ianaMd.includes("| --- | --- | --- |"), "IANA table has a separator row");
+    assert(ianaMd.includes("| 404 | Not Found |"), "IANA entry row kept");
+    assert(ianaMd.includes("| 512-599 | Unassigned |"), "IANA trailing entry kept");
+    const ianaRows = ianaMd.split("\n").filter((line) => line.startsWith("| ")).length;
+    assert(ianaRows >= 76, `every IANA registry row kept (got ${ianaRows})`);
+    assert(!ianaMd.includes("Domain Names"), "IANA footer navigation dropped");
+    assert(!/<\/(?:td|th|tr|table|div|a)>/i.test(ianaMd), "no tags leak into the registry table");
+    assert(
+      ianaMd.includes("Last Updated") && ianaMd.includes("2025-09-15"),
+      "IANA page date kept as content",
+    );
+
+    // Wikipedia: headings, body, and the infobox survive; site chrome does not.
+    const wiki = sample("wikipedia-artemis-ii.html.gz");
+    const wikiMd = htmlToMarkdown(wiki, { baseUrl: "https://en.wikipedia.org/wiki/Artemis_II" });
+    const wikiMeta = extractPageMetadata(wiki);
+    assert(wikiMeta.title === "Artemis II - Wikipedia", `Wikipedia title (got ${wikiMeta.title})`);
+    assert(wikiMeta.updated === undefined, "no update date is invented for Wikipedia");
+    assert(wikiMd.startsWith("# Artemis II"), "Wikipedia article title kept");
+    assert(/^## History$/m.test(wikiMd), "Wikipedia section heading kept");
+    assert(/^### Heat shield concerns$/m.test(wikiMd), "Wikipedia subsection heading kept");
+    assert(
+      wikiMd.includes("Post-flight inspections found areas of char loss"),
+      "Wikipedia article body kept",
+    );
+    assert(wikiMd.includes("| Names | Artemis II"), "Wikipedia infobox label rows kept");
+    assert(wikiMd.includes("| Mission type | Crewed lunar"), "Wikipedia infobox values kept");
+    assert(!wikiMd.includes("Jump to content"), "Wikipedia site chrome dropped");
+    assert(!wikiMd.includes("Random article"), "Wikipedia sidebar navigation dropped");
+    assert(!wikiMd.includes("Toggle the table of contents"), "Wikipedia table of contents dropped");
+
+    // MDN as the crawler stores it: a JavaScript shell with no article in it, so the
+    // conversion must not invent one.
+    const mdnUrl = "https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status";
+    const mdnShell = sample("mdn-status-shell.html.gz");
+    const shellMd = htmlToMarkdown(mdnShell, { baseUrl: mdnUrl });
+    const shellMeta = extractPageMetadata(mdnShell);
+    assert(
+      shellMeta.title === "HTTP response status codes - HTTP | MDN",
+      `MDN shell title (got ${shellMeta.title})`,
+    );
+    assert(!/^#{1,6} /m.test(shellMd), "no article headings are invented for MDN's JavaScript shell");
+    assert(
+      shellMd.length < 200,
+      `MDN shell carries no article text, so little is left (got ${shellMd.length} chars)`,
+    );
+
+    // MDN article HTML as a browser receives it: headings and prose convert in full.
+    const mdnPage = sample("mdn-status-page.html.gz");
+    const pageMd = htmlToMarkdown(mdnPage, { baseUrl: mdnUrl });
+    assert(pageMd.startsWith("# HTTP response status codes"), "MDN article heading kept");
+    assert(/^## Informational responses$/m.test(pageMd), "MDN section heading kept");
+    assert(/^## Browser compatibility$/m.test(pageMd), "MDN late section heading kept");
+    assert(pageMd.includes("100 Continue"), "MDN status code entries kept");
+    assert(
+      pageMd.includes("This interim response indicates that the client should continue"),
+      "MDN article prose kept",
+    );
+    assert(!pageMd.includes("Skip to main content"), "MDN page chrome dropped");
+    assert(!pageMd.includes("See all"), "MDN sidebar menus dropped");
+
+    // NASA: navigation and footer text leave, the article stays, and the page states
+    // its update date.
+    const nasaUrl =
+      "https://www.nasa.gov/missions/artemis/artemis-2/rigorous-analysis-confirms-nasas-artemis-ii-heat-shield-performance/";
+    const nasa = sample("nasa-artemis-heat-shield.html.gz");
+    const nasaMd = htmlToMarkdown(nasa, { baseUrl: nasaUrl });
+    const nasaMeta = extractPageMetadata(nasa);
+    assert(
+      nasaMeta.title?.startsWith("Rigorous Analysis Confirms NASA") === true,
+      `NASA article title (got ${nasaMeta.title})`,
+    );
+    assert(
+      nasaMeta.updated === "2026-10-15T10:57:24-04:00",
+      `NASA update date read from article metadata (got ${nasaMeta.updated})`,
+    );
+    assert(nasaMd.includes("# Rigorous Analysis Confirms NASA"), "NASA article heading kept");
+    assert(
+      nasaMd.includes("maximum velocity of 39 times the speed of sound"),
+      "NASA article body kept",
+    );
+    assert(!nasaMd.includes("News Releases"), "NASA news menu dropped");
+    assert(!nasaMd.includes("Page Last Updated"), "NASA footer meta dropped");
+    assert(
+      !nasaMd.includes("NASA Demonstrates Next-Generation Heat Shield Technologies"),
+      "NASA related-article cards dropped",
+    );
+    assert(nasaMd.length < 15000, `NASA output is article content only (got ${nasaMd.length})`);
+  }
+
+  // 15. The result header shows redirects, the update date, and nothing it cannot know
+  {
+    const base = {
+      requestedUrl: "https://example.com/start",
+      resolvedUrl: "https://example.com/start",
+      content: "Body",
+      title: "A page",
+      source: "cache" as const,
+      bytes: 4,
+      truncated: false,
+    };
+    const plain = formatWebFetchResult(base);
+    assert(!plain.includes("Requested:"), "no redirect line when the URL did not change");
+    assert(!plain.includes("Updated:"), "no update line when the page states no date");
+    assert(
+      plain.startsWith("Title: A page\nSource: https://example.com/start (cache)"),
+      "plain header unchanged",
+    );
+
+    const redirected = formatWebFetchResult({
+      ...base,
+      resolvedUrl: "https://example.com/final",
+      updated: "2026-10-15T10:57:24-04:00",
+      source: "live",
+    });
+    assert(
+      redirected.startsWith(
+        "Title: A page\nUpdated: 2026-10-15T10:57:24-04:00\nRequested: https://example.com/start\nSource: https://example.com/final (live)",
+      ),
+      `header reports the requested and final URL (got ${redirected.split("\n").slice(0, 4).join(" | ")})`,
+    );
+  }
+
+  // 16. An oversized page is cut at the cap, and the cut is stated in the result
+  {
+    mockFetch((url) =>
+      url.endsWith(":rewriteUri")
+        ? jsonResponse(200, {})
+        : jsonResponse(200, { content: sample("wikipedia-artemis-ii.html.gz") }),
+    );
+    const result = await executeAntigravityWebFetch({
+      apiKey: JSON.stringify({ token: "tok", projectId: "proj" }),
+      url: "https://en.wikipedia.org/wiki/Artemis_II",
+      maxChars: 4000,
+    });
+    assert(result.truncated, "truncation flagged");
+    assert(result.content.includes("[truncated at 4000 characters;"), "note names the cap");
+    assert(
+      result.content.length < 4200,
+      `content stays close to the cap (got ${result.content.length})`,
+    );
+    assert(
+      result.content.startsWith("# Artemis II"),
+      "the start of the page is what is kept",
+    );
   }
 
   console.log("web fetch: URL guards, RPC shapes, cache/live flow, markdown conversion, and caps passed");

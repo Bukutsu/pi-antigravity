@@ -57,6 +57,8 @@ export type WebFetchResult = {
   content: string;
   title?: string;
   description?: string;
+  /** Date the page states it was last modified, when it states one. */
+  updated?: string;
   /** Whether the crawl cache answered, or the page was fetched live. */
   source: WebFetchSource;
   /** Size of the crawler response before conversion and truncation. */
@@ -229,6 +231,7 @@ function toResult(params: {
     content: text,
     title: metadata.title,
     description: metadata.description,
+    updated: metadata.updated,
     source,
     bytes: content.length,
     truncated,
@@ -303,10 +306,19 @@ export async function executeAntigravityWebFetch(
   throw new Error(`Antigravity web fetch failed: ${lastError}`);
 }
 
-/** Render a result as the block a model or the user reads. */
+/**
+ * Render a result as the block a model or the user reads.
+ *
+ * The requested URL is only printed when it differs from the source, so a redirect is
+ * visible without repeating the same URL twice on ordinary pages.
+ */
 export function formatWebFetchResult(result: WebFetchResult): string {
   const header = [`Title: ${result.title ?? "Untitled page"}`];
   if (result.description) header.push(`Description: ${result.description}`);
+  if (result.updated) header.push(`Updated: ${result.updated}`);
+  if (result.requestedUrl !== result.resolvedUrl) {
+    header.push(`Requested: ${result.requestedUrl}`);
+  }
   header.push(`Source: ${result.resolvedUrl} (${result.source === "live" ? "live" : "cache"})`);
   return `${header.join("\n")}\n\n---\n\n${result.content}`;
 }
