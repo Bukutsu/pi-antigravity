@@ -13,7 +13,7 @@ import {
   resolveMaxChars,
   validateFetchTarget,
 } from "../src/web-fetch/index.js";
-import { extractPageMetadata, htmlToMarkdown, looksLikeHtml } from "../src/web-fetch/index.js";
+import { extractPageMetadata, htmlToMarkdown, isPartialCopy, looksLikeHtml } from "../src/web-fetch/index.js";
 
 /** Abort the run with a message. */
 function fail(message: string): never {
@@ -409,7 +409,7 @@ async function main() {
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);
     }
-    assert(message.includes("returned no content"), `empty response explained (got ${message})`);
+    assert(message.includes("holds no readable text"), `empty response explained (got ${message})`);
   }
 
   // 13. Content that renders to nothing is a cache miss too, and a blank live page is reported
@@ -447,7 +447,7 @@ async function main() {
       message = error instanceof Error ? error.message : String(error);
     }
     assert(
-      message.includes("returned no content"),
+      message.includes("holds no readable text"),
       `HTML that renders to nothing reported (got ${message})`,
     );
     assert(
@@ -620,6 +620,259 @@ async function main() {
     assert(
       result.content.startsWith("# Artemis II"),
       "the start of the page is what is kept",
+    );
+  }
+
+  // 17. Chrome rules on a page written to exercise each one in isolation
+  {
+    const chrome = `<!doctype html>
+<html lang="en"><head><title>Rules</title></head><body>
+<div role="banner"><p>Banner text</p></div>
+<div role="navigation"><p>Navigating text</p></div>
+<aside><p>Aside text</p></aside>
+<main><h1>Kept heading</h1><p>Kept body text.</p></main>
+<div role="contentinfo"><p>Footer text</p></div>
+</body></html>`;
+    const chromeMd = htmlToMarkdown(chrome);
+    assert(chromeMd.includes("Kept heading") && chromeMd.includes("Kept body text."), `the main region is kept (${JSON.stringify(chromeMd.slice(0, 120))})`);
+    for (const gone of ["Banner text", "Navigating text", "Aside text", "Footer text"]) {
+      assert(!chromeMd.includes(gone), `${gone} dropped as chrome`);
+    }
+
+    const hidden = '<html lang="en"><body><p aria-hidden="true">Hidden text</p><p>Visible text</p></body></html>';
+    const hiddenMd = htmlToMarkdown(hidden);
+    assert(hiddenMd.includes("Visible text"), "marked text kept");
+    assert(!hiddenMd.includes("Hidden text"), "aria-hidden text dropped");
+
+    const skip = htmlToMarkdown(
+      '<html lang="en"><body>' +
+        '<a href="#main-content" class="visually-hidden skip-button">Skip to main content</a>' +
+        '<h1>Doc<a class="headerlink" href="#doc" title="Link to this heading">¶</a></h1>' +
+        "<p>Body.</p></body></html>",
+      { baseUrl: "https://example.com/page" },
+    );
+    assert(skip.includes("Doc") && skip.includes("Body."), `content kept around in-page links (${JSON.stringify(skip)})`);
+    assert(!skip.includes("Skip to main content"), "skip link dropped");
+    assert(/¶( |$)/m.test(skip) === false, "permalink-only label dropped");
+
+    const language = htmlToMarkdown(
+      '<html lang="en"><body><p>' +
+        '<a href="/simple-en/" hreflang="en-simple">Simple English</a> ' +
+        '<a href="/en/" lang="en">English</a></p></body></html>',
+      { baseUrl: "https://en.wikipedia.org/wiki/Doc" },
+    );
+    assert(language.includes("English"), "same-language link kept");
+    assert(!language.includes("Simple English"), "simple-English interlanguage link dropped");
+
+    const roleMain = htmlToMarkdown(
+      '<html lang="en"><body>' +
+        "<nav><p>Menu text</p></nav>" +
+        '<div role="main"><h1>Region heading</h1>' +
+        '<p>Region body.</p><div role="complementary"><p>Related sidebar.</p></div></div>' +
+        "<footer><p>Footer text</p></footer>" +
+        "</body></html>",
+    );
+    assert(
+      roleMain.includes("Region heading") && roleMain.includes("Region body."),
+      `role=main region selected (got ${JSON.stringify(roleMain.slice(0, 120))})`,
+    );
+    assert(roleMain.includes("Related sidebar."), "complementary kept as content, unlike the landmarks");
+    assert(!roleMain.includes("Menu text") && !roleMain.includes("Footer text"), "landmark chrome around the region dropped");
+  }
+
+  // 18. Old and niche pages: 1991 markup, SGML close tags, script strings, head-only copies
+  {
+    const first = sample("first-website.html.gz");
+    const firstMeta = extractPageMetadata(first);
+    assert(firstMeta.title === "The World Wide Web project", `first-website title (got ${firstMeta.title})`);
+    assert(isPartialCopy(first) === false, "a copy that ends with </html> is not partial");
+    const firstMd = htmlToMarkdown(first, { baseUrl: "http://info.cern.ch/hypertext/WWW/TheProject.html" });
+    assert(/^# World Wide Web$/m.test(firstMd), `1991 H1 heading kept (${firstMd.length} chars)`);
+    assert(firstMd.length > 1500, `1991 page body kept (${firstMd.length} chars)`);
+    assert(
+      firstMd.includes("[anonymous FTP](") || firstMd.includes("anonymous FTP"),
+      "1991 page inline links kept",
+    );
+    assert(
+      firstMd.includes("(http://info.cern.ch/hypertext/WWW/WhatIs.html)") ||
+        firstMd.includes("(//info.cern.ch/hypertext/WWW/WhatIs.html)"),
+      "1991 relative href resolved against the page URL",
+    );
+
+    const tldpMd = htmlToMarkdown(sample("tldp-howto.html.gz"), {
+      baseUrl: "https://tldp.org/HOWTO/Unix-and-Internet-Fundamentals-HOWTO/",
+    });
+    assert(/^# The Unix and Internet Fundamentals HOWTO$/m.test(tldpMd), "TLDP title heading kept");
+    assert(tldpMd.includes("| Revision 2.14 |"), `SGML close tags (<TD >) kept rows as a table (${tldpMd.split("\n").length} lines)`);
+    assert(tldpMd.includes("| --- | --- | --- |"), "revision table separator written");
+    assert(!/Revision 2\.14 Revised by/i.test(tldpMd), "revision table not left as pipe text");
+    assert(tldpMd.includes("This document des"), "the truncated tail keeps its partial text");
+
+    const javadoc = sample("javadoc-string.html.gz");
+    const javadocMd = htmlToMarkdown(javadoc, {
+      baseUrl: "https://docs.oracle.com/javase/8/docs/api/java/lang/String.html",
+    });
+    assert(javadocMd.includes("represents character strings"), "javadoc class prose kept");
+    assert(javadocMd.includes("Class String"), "javadoc class docs kept");
+    assert(javadocMd.includes("[Overview]("), "javadoc navigation list kept");
+    assert(!/var (?:methods|tabs|allClassesLink)/.test(javadocMd), "javadoc script contents dropped");
+    assert(!javadocMd.includes("Skip navigation links"), "javadoc skip link dropped");
+    assert(javadocMd.length > 5000, `javadoc conversion keeps the page (got ${javadocMd.length} chars)`);
+    assert(isPartialCopy(javadoc), "javadoc copy ends mid-page");
+
+    const jam = sample("spacejam.html.gz");
+    const jamMd = htmlToMarkdown(jam, { baseUrl: "https://www.spacejam.com/1996/" });
+    assert(jamMd.length < 100, `a head-only layout-table fragment yields nearly nothing (got ${jamMd.length})`);
+    assert(isPartialCopy(jam), "the 1996 copy cut inside a tag is partial");
+    assert(extractPageMetadata(jam).title === "Space Jam", "a head-only copy still exposes its title");
+  }
+
+  // 19. Docs pages the converter previously failed outright, with copy extremes
+  {
+    // GitHub Docs as the crawler serves it: a body-less JS shell; report honestly.
+    const gh = sample("github-docs-hello-world.html.gz");
+    const ghMeta = extractPageMetadata(gh);
+    assert(ghMeta.title === "Hello World - GitHub Docs", `GitHub Docs title (got ${ghMeta.title})`);
+    assert(ghMeta.description?.includes("Follow this Hello World exercise") === true, "GitHub Docs description kept");
+    const ghMd = htmlToMarkdown(gh);
+    assert(!/^#{1,6} /m.test(ghMd), "no article headings invented for the GitHub Docs shell");
+    assert(ghMd.length < 100, `GitHub Docs shell keeps only crumbs (${ghMd.length} chars)`);
+    assert(isPartialCopy(gh), "GitHub Docs shell is partial");
+
+    // RFC 9110: big standards copy; structure survives and the copy ends mid-document.
+    const rfc = sample("rfc9110-excerpt.html.gz");
+    const rfcMd = htmlToMarkdown(rfc, { baseUrl: "https://www.rfc-editor.org/rfc/rfc9110.html" });
+    const rfcMeta = extractPageMetadata(rfc);
+    assert(rfcMeta.title === "RFC 9110: HTTP Semantics", `RFC title (got ${rfcMeta.title})`);
+    assert(rfcMeta.description?.startsWith("The Hypertext Transfer Protocol (HTTP) is a stateless") === true, "RFC description kept");
+    assert(rfcMd.length > 50000, `RFC pages keep their bulk (${rfcMd.length} chars)`);
+    assert(rfcMd.includes("Internet Engineering Task Force (IETF)"), "RFC header kept");
+    assert((rfcMd.match(/^```/gm) ?? []).length % 2 === 0, "RFC code fences stay balanced");
+    assert(!/^#{1,6}$/m.test(rfcMd), "no empty RFC headings");
+    assert(isPartialCopy(rfc), "the RFC excerpt ends mid-document");
+
+    // Python docs: role="main" bounds the article, navigation leaves.
+    const pyUrl = "https://docs.python.org/3/library/urllib.request.html";
+    const py = sample("python-urllib-request.html.gz");
+    const pyMeta = extractPageMetadata(py);
+    assert(pyMeta.title === "urllib.request — Extensible library for opening URLs", `Python title (got ${pyMeta.title})`);
+    assert(pyMeta.description?.includes("Source code: Lib/urllib/request.py") === true, "Python description kept");
+    const pyMd = htmlToMarkdown(py, { baseUrl: pyUrl });
+    assert(pyMd.startsWith("# ` urllib.request `"), "Python article title kept");
+    assert(pyMd.includes("module defines functions and classes which help in"), "Python article prose kept");
+    assert(pyMd.includes("Changed in version 3.13"), "Python version notes kept");
+    assert(!pyMd.includes("py-modindex.html"), "Python navigation links dropped");
+    assert(!/<[a-z/][^>\n]*$/im.test(pyMd), "no raw tag fragment ends the Python page");
+    assert(isPartialCopy(py), "the Python copy ends mid-page");
+
+    // NIST: a Windows CMS puts carriage returns and an empty heading in the copy.
+    const nist = sample("nist-sp800-53r5.html.gz");
+    const nistMd = htmlToMarkdown(nist, { baseUrl: "https://csrc.nist.gov/pubs/sp/800/53/r5/upd1/final" });
+    const nistMeta = extractPageMetadata(nist);
+    assert(nistMeta.title === "SP 800-53 Rev. 5, Security and Privacy Controls for Information Systems and Organizations | CSRC", `NIST title (got ${nistMeta.title})`);
+    assert(!nistMd.includes("\r"), "NIST carriage returns removed");
+    assert(!nistMd.includes("\n\n\n"), "NIST runs of blank lines collapsed");
+    assert(nistMd.length > 8000, `NIST abstract and metadata kept (${nistMd.length} chars)`);
+    assert(isPartialCopy(nist) === false, "the NIST copy ran to its own close tag");
+  }
+
+  // 20. Failure messages say which stage failed, and a partial copy is a result, not an error
+  {
+    const creds = JSON.stringify({ token: "tok", projectId: "proj" });
+    const messages: Record<string, string> = {};
+
+    // Cache answers, then the live fetch fails.
+    mockFetch((url, init) => {
+      if (url.endsWith(":rewriteUri")) return jsonResponse(200, {});
+      if (String(init.body ?? "").includes("liveFetch")) {
+        return jsonResponse(503, { error: { message: "Internal error" } });
+      }
+      return jsonResponse(200, { content: "" });
+    });
+    try {
+      await executeAntigravityWebFetch({ apiKey: creds, url: "https://example.com/live-fails" });
+    } catch (error) {
+      messages.live = error instanceof Error ? error.message : String(error);
+    }
+    assert(
+      messages.live.includes("not in the crawl cache, and the live fetch failed (HTTP 503"),
+      `the live failure names its stage (${messages.live})`,
+    );
+    assert(messages.live.includes("Try again later"), "the live failure suggests a next step");
+
+    // The cache itself fails: a different message, and no live retry wastes time.
+    mockFetch((url) =>
+      url.endsWith(":rewriteUri") ? jsonResponse(200, {}) : jsonResponse(500, { error: { message: "upstream" } }),
+    );
+    try {
+      await executeAntigravityWebFetch({ apiKey: creds, url: "https://example.com/cache-fails" });
+    } catch (error) {
+      messages.cache = error instanceof Error ? error.message : String(error);
+    }
+    assert(messages.cache.includes("cache could not answer"), `the cache failure names its stage (${messages.cache})`);
+    assert(messages.cache !== messages.live, "the two failures are told apart");
+
+    // A partial copy the cache knows: still a result, still with the note.
+    mockFetch((url, init) => {
+      if (url.endsWith(":rewriteUri")) return jsonResponse(200, {});
+      if (String(init.body ?? "").includes("liveFetch")) {
+        return jsonResponse(200, { content: sample("github-docs-hello-world.html.gz") });
+      }
+      return jsonResponse(404, { error: { message: "NOT_FOUND" } });
+    });
+    const partial = await executeAntigravityWebFetch({ apiKey: creds, url: "https://docs.github.com/" });
+    assert(partial.partial === true, "result flags the partial copy");
+    const partialBlock = formatWebFetchResult(partial);
+    assert(
+      partialBlock.includes("Note: the crawler's copy ends mid-page and holds no readable content."),
+      "partial copy noted in the block",
+    );
+
+    // A partial copy with no readable content at all.
+    mockFetch((url, init) => {
+      if (url.endsWith(":rewriteUri")) return jsonResponse(200, {});
+      if (String(init.body ?? "").includes("liveFetch")) {
+        return jsonResponse(200, {
+          content:
+            '<html><head><title>Untitled</title><style>body{color:#000}</style></head><body bgcolor="#000" background="bg.gif" ',
+        });
+      }
+      return jsonResponse(404, { error: { message: "NOT_FOUND" } });
+    });
+    const emptyPartial = await executeAntigravityWebFetch({ apiKey: creds, url: "https://example.com/bare" });
+    assert(emptyPartial.partial === true, "an empty partial copy is still partial");
+    assert(emptyPartial.content.trim().length === 0, `an empty partial copy has no body (got ${JSON.stringify(emptyPartial.content)})`);
+    assert(
+      formatWebFetchResult(emptyPartial).includes(
+        "Note: the crawler's copy ends mid-page and holds no readable content.",
+      ),
+      "header says the copy ended before any content",
+    );
+  }
+
+  // 21. Truncation closes the code fence it cuts through
+  {
+    const fenced = `<!doctype html>
+<html lang="en"><head><title>Fences</title></head><body>
+<h1>Fences</h1>
+<pre>${"x".repeat(9000)}</pre>
+</body></html>`;
+    const rendered = htmlToMarkdown(fenced, { baseUrl: "https://example.com/fences" });
+    const open = rendered.indexOf("```");
+    const close = rendered.indexOf("```", open + 3);
+    assert(open >= 0 && close > open + 20, `the fixture has a long fence (${open}/${close})`);
+    mockFetch((url) =>
+      url.endsWith(":rewriteUri") ? jsonResponse(200, {}) : jsonResponse(200, { content: fenced }),
+    );
+    const cut = await executeAntigravityWebFetch({
+      apiKey: JSON.stringify({ token: "tok", projectId: "proj" }),
+      url: "https://example.com/fences",
+      maxChars: open + 10,
+    });
+    assert(cut.truncated, "fence fixture truncated");
+    assert(
+      /\n```\n\n… \[truncated at \d+ characters/.test(cut.content),
+      `the cut re-closed the fence before the note (${JSON.stringify(cut.content.slice(-80))})`,
     );
   }
 

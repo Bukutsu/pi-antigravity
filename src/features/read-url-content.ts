@@ -38,7 +38,12 @@ export default function (pi: ExtensionAPI): void {
         const result = await executeAntigravityWebFetch({ apiKey, url: params.url, signal });
         return {
           content: [{ type: "text", text: formatWebFetchResult(result) }],
-          details: { source: result.source, bytes: result.bytes, truncated: result.truncated },
+          details: {
+            source: result.source,
+            bytes: result.bytes,
+            truncated: result.truncated,
+            partial: result.partial,
+          },
         };
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);

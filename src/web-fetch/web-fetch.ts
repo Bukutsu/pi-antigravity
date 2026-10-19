@@ -24,7 +24,7 @@ import { isPrivateAddress } from "../search/index.js";
 import { antigravityFetch } from "../utils/http.js";
 import { safeError } from "../utils/security.js";
 import { antigravityEnv, isRecord } from "../utils/util.js";
-import { extractPageMetadata, htmlToMarkdown, looksLikeHtml } from "./markdown.js";
+import { extractPageMetadata, htmlToMarkdown, isPartialCopy, looksLikeHtml } from "./markdown.js";
 
 export const REWRITE_URI_PATH = "/v1internal:rewriteUri";
 export const TRAWLER_FETCH_PATH = "/v1internal:fetchFromTrawlerCache";
@@ -63,7 +63,10 @@ export type WebFetchResult = {
   source: WebFetchSource;
   /** Size of the crawler response before conversion and truncation. */
   bytes: number;
+  /** Whether the returned content was capped at the character budget. */
   truncated: boolean;
+  /** Whether the crawler's own copy ends mid-document, so the page is incomplete. */
+  partial: boolean;
 };
 
 /**
@@ -174,8 +177,12 @@ async function postJson(
 }
 
 /** Error carrying `fatal` when retrying another endpoint cannot help. */
-function fetchError(text: string, status: number): Error {
-  const message = jsonOrTextError(text).slice(0, 400) || `HTTP ${status}`;
+function fetchError(text: string, status: number, stage: "cache" | "live"): Error {
+  const detail = jsonOrTextError(text).slice(0, 400) || `HTTP ${status}`;
+  const message =
+    stage === "cache"
+      ? `The crawl cache could not answer (HTTP ${status}: ${detail}).`
+      : `The page is not in the crawl cache, and the live fetch failed (HTTP ${status}: ${detail}). Try again later, or open the page in a browser.`;
   return Object.assign(new Error(message), { fatal: status < 500 && status !== 429 });
 }
 
@@ -209,6 +216,13 @@ function renderContent(value: string, raw: boolean, baseUrl: string): string {
   return !raw && looksLikeHtml(value) ? htmlToMarkdown(value, { baseUrl }) : value.trim();
 }
 
+/** Close a code fence the character cap cut through, so the note is not read as code. */
+function keepFencesClosed(markdown: string): string {
+  const fences = markdown.match(/^`{3,}/gm) ?? [];
+  if (fences.length % 2 === 0) return markdown;
+  return `${markdown}\n${fences[fences.length - 1]}`;
+}
+
 /** Format the rendered page, extract metadata, and apply the character budget. */
 function toResult(params: {
   requestedUrl: string;
@@ -220,10 +234,11 @@ function toResult(params: {
   maxChars: number;
 }): WebFetchResult {
   const { requestedUrl, resolvedUrl, content, rendered, source, raw, maxChars } = params;
-  const metadata = !raw && looksLikeHtml(content) ? extractPageMetadata(content) : {};
+  const html = !raw && looksLikeHtml(content);
+  const metadata = html ? extractPageMetadata(content) : {};
   const truncated = rendered.length > maxChars;
   const text = truncated
-    ? `${rendered.slice(0, maxChars)}\n\n… [truncated at ${maxChars} characters; the page is ${rendered.length}]`
+    ? `${keepFencesClosed(rendered.slice(0, maxChars))}\n\n… [truncated at ${maxChars} characters; the page is ${rendered.length}]`
     : rendered;
   return {
     requestedUrl,
@@ -235,6 +250,7 @@ function toResult(params: {
     source,
     bytes: content.length,
     truncated,
+    partial: html ? isPartialCopy(content) : false,
   };
 }
 
@@ -273,27 +289,39 @@ export async function executeAntigravityWebFetch(
       let rendered = content === undefined ? "" : renderContent(content, raw, resolvedUrl);
       let source: WebFetchSource = "cache";
 
-      if (!rendered.trim()) {
-        // A 404, an empty 200, and a page that renders to nothing are all cache misses; only
-        // other statuses are errors.
-        if (cached.status !== 404 && cached.status !== 200) {
-          throw fetchError(cached.text, cached.status);
-        }
-        source = "live";
-        const live = await postJson(
-          endpoint,
-          TRAWLER_FETCH_PATH,
-          headers,
-          buildTrawlerFetchRequest(resolvedUrl, true),
-          options.signal,
-        );
-        if (live.status !== 200) throw fetchError(live.text, live.status);
-        content = parseTrawlerContent(live.data);
-        rendered = content === undefined ? "" : renderContent(content, raw, resolvedUrl);
+      if (rendered.trim() && content !== undefined) {
+        // The cache answered with a readable copy: hand it back as-is. A partial copy
+        // still holds most of the page's own content, which beats an error; it leaves
+        // with the partial-copy note that says what it is.
+        return toResult({ requestedUrl, resolvedUrl, content, rendered, source, raw, maxChars });
       }
+      // A 404, an empty 200, and a page that renders to nothing are all cache misses;
+      // only other statuses are errors.
+      if (cached.status !== 404 && cached.status !== 200) {
+        throw fetchError(cached.text, cached.status, "cache");
+      }
+      source = "live";
+      const live = await postJson(
+        endpoint,
+        TRAWLER_FETCH_PATH,
+        headers,
+        buildTrawlerFetchRequest(resolvedUrl, true),
+        options.signal,
+      );
+      if (live.status !== 200) throw fetchError(live.text, live.status, "live");
+      content = parseTrawlerContent(live.data);
+      rendered = content === undefined ? "" : renderContent(content, raw, resolvedUrl);
 
       if (content === undefined || !rendered.trim()) {
-        throw new Error("The fetch service returned no content for that URL.");
+        // The service answered, but nothing readable came out of the copy: a page that
+        // only runs JavaScript, or one that a login wall keeps us out of. A copy that
+        // ends mid-document explains itself instead, so it still becomes a result with
+        // the note that says there is nothing in it.
+        if (!(content !== undefined && looksLikeHtml(content) && isPartialCopy(content))) {
+          throw new Error(
+            "The page's copy holds no readable text: it may need JavaScript or a login, so open it in a browser.",
+          );
+        }
       }
       return toResult({ requestedUrl, resolvedUrl, content, rendered, source, raw, maxChars });
     } catch (error) {
@@ -310,7 +338,8 @@ export async function executeAntigravityWebFetch(
  * Render a result as the block a model or the user reads.
  *
  * The requested URL is only printed when it differs from the source, so a redirect is
- * visible without repeating the same URL twice on ordinary pages.
+ * visible without repeating the same URL twice on ordinary pages, and an incomplete
+ * crawler copy is called out rather than passed off as the whole page.
  */
 export function formatWebFetchResult(result: WebFetchResult): string {
   const header = [`Title: ${result.title ?? "Untitled page"}`];
@@ -320,6 +349,13 @@ export function formatWebFetchResult(result: WebFetchResult): string {
     header.push(`Requested: ${result.requestedUrl}`);
   }
   header.push(`Source: ${result.resolvedUrl} (${result.source === "live" ? "live" : "cache"})`);
+  if (result.partial) {
+    header.push(
+      result.content.trim()
+        ? "Note: the crawler's copy ends mid-page, so some content may be missing."
+        : "Note: the crawler's copy ends mid-page and holds no readable content.",
+    );
+  }
   return `${header.join("\n")}\n\n---\n\n${result.content}`;
 }
 
