@@ -266,7 +266,10 @@ export async function executeAntigravityWebFetch(
       let source: WebFetchSource = "cache";
 
       if (!content) {
-        if (cached.status !== 404) throw fetchError(cached.text, cached.status);
+        // A 404 and an empty 200 both mean the cache has nothing; only other statuses are errors.
+        if (cached.status !== 404 && cached.status !== 200) {
+          throw fetchError(cached.text, cached.status);
+        }
         source = "live";
         const live = await postJson(
           endpoint,

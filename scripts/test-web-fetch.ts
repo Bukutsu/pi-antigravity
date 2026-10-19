@@ -170,6 +170,30 @@ async function main() {
     "title tag is the fallback",
   );
 
+  // Entities outside the Unicode range must survive instead of throwing.
+  const malformed = htmlToMarkdown("<p>kept &#999999999; and &#x110000; but &#65; decodes</p>");
+  assert(malformed.includes("&#999999999;"), `huge decimal entity kept (got ${malformed})`);
+  assert(malformed.includes("&#x110000;"), `huge hex entity kept (got ${malformed})`);
+  assert(malformed.includes("A decodes"), "valid entity still decoded");
+  assert(
+    extractPageMetadata("<title>Weird &#99999999; title</title>").title === "Weird &#99999999; title",
+    "malformed entity in metadata does not throw",
+  );
+
+  // Dollar patterns in code must stay literal when the fence is restored.
+  const dollars = htmlToMarkdown("<pre>echo $$ and $& and $' end</pre>");
+  assert(dollars.includes("echo $$ and $& and $' end"), `dollar patterns survive (got ${dollars})`);
+
+  // Images escape their label and encode their destination like links do.
+  const image = htmlToMarkdown(
+    '<img src="/img/logo (1).png" alt="Logo [v2] &amp; more">',
+    { baseUrl: "https://example.com/page/" },
+  );
+  assert(
+    image.includes("![Logo \\[v2\\] & more](https://example.com/img/logo%20(1%29.png)"),
+    `image label and destination escaped (got ${image})`,
+  );
+
   // 7. Cache hit: one RPC, no live fetch
   {
     const { calls } = mockFetch((url) =>
@@ -279,6 +303,41 @@ async function main() {
       message = error instanceof Error ? error.message : String(error);
     }
     assert(message.includes("/login antigravity"), `missing credentials rejected (${message})`);
+  }
+
+  // 12. A 200 with no content is a cache miss, and a live fetch that is also empty reports why
+  {
+    const { calls } = mockFetch((url, init) => {
+      if (url.endsWith(":rewriteUri")) return jsonResponse(200, {});
+      if (String(init.body ?? "").includes("liveFetch")) {
+        return jsonResponse(200, { content: "<html><body><h1>Recovered</h1></body></html>" });
+      }
+      return jsonResponse(200, { content: "" });
+    });
+    const result = await executeAntigravityWebFetch({
+      apiKey: JSON.stringify({ token: "tok", projectId: "proj" }),
+      url: "https://example.com/empty-cache",
+    });
+    assert(result.source === "live", "empty cached content falls through to the live fetch");
+    assert(result.content.includes("# Recovered"), "live content used after the empty cache entry");
+    assert(
+      calls.filter((call) => call.body.includes("liveFetch")).length === 1,
+      "exactly one live fetch after an empty cache entry",
+    );
+
+    mockFetch((url) =>
+      url.endsWith(":rewriteUri") ? jsonResponse(200, {}) : jsonResponse(200, { content: "" }),
+    );
+    let message = "";
+    try {
+      await executeAntigravityWebFetch({
+        apiKey: JSON.stringify({ token: "tok", projectId: "proj" }),
+        url: "https://example.com/nothing",
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    assert(message.includes("returned no content"), `empty response explained (got ${message})`);
   }
 
   console.log("web fetch: URL guards, RPC shapes, cache/live flow, markdown conversion, and caps passed");

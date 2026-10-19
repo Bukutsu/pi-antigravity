@@ -86,6 +86,16 @@ export function looksLikeHtml(text: string): boolean {
   return /<(?:!doctype|html|head|body|div|p|table|span|article|main)\b/i.test(text.slice(0, 4000));
 }
 
+/** Escape the label characters that would end Markdown link or image text early. */
+function escapeLabel(text: string): string {
+  return text.replace(/[[\]\\]/g, "\\$&");
+}
+
+/** Encode the destination characters that would end a Markdown target early. */
+function encodeDestination(url: string): string {
+  return url.replace(/\)/g, "%29").replace(/ /g, "%20");
+}
+
 export type PageMetadata = {
   title?: string;
   description?: string;
@@ -142,7 +152,11 @@ function restoreCodeBlocks(markdown: string, blocks: string[]): string {
   let text = markdown;
   for (const [index, code] of blocks.entries()) {
     const fence = code.includes("```") ? "````" : "```";
-    text = text.replace(`${CODE_SLOT}${index}${CODE_SLOT}`, `\n\n${fence}\n${code}\n${fence}\n\n`);
+    // A function replacement, so `$&` and `$'` inside the code stay literal.
+    text = text.replace(
+      `${CODE_SLOT}${index}${CODE_SLOT}`,
+      () => `\n\n${fence}\n${code}\n${fence}\n\n`,
+    );
   }
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }
@@ -185,16 +199,16 @@ export function htmlToMarkdown(html: string, options: HtmlToMarkdownOptions = {}
   text = text.replace(/<img\b[^>]*>/gi, (tag: string) => {
     const source = attribute(tag, "src");
     if (!source || /^data:/i.test(source)) return " ";
-    const alt = attribute(tag, "alt") ?? "";
-    return `![${alt}](${resolveTarget(source, baseUrl)})`;
+    const alt = decodeHtmlEntities(attribute(tag, "alt") ?? "");
+    return `![${escapeLabel(alt)}](${encodeDestination(resolveTarget(source, baseUrl))})`;
   });
 
   text = text.replace(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi, (_match, attrs: string, inner: string) => {
     const href = attribute(attrs, "href");
     const label = decodeHtmlEntities(stripTags(inner));
     if (!href || /^(?:javascript|#)/i.test(href)) return label || " ";
-    const safeLabel = (label || href).replace(/[[\]\\]/g, "\\$&");
-    const safeHref = resolveTarget(href, baseUrl).replace(/\)/g, "%29").replace(/ /g, "%20");
+    const safeLabel = escapeLabel(label || href);
+    const safeHref = encodeDestination(resolveTarget(href, baseUrl));
     return `[${safeLabel}](${safeHref})`;
   });
 
