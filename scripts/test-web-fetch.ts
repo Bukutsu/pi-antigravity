@@ -340,6 +340,57 @@ async function main() {
     assert(message.includes("returned no content"), `empty response explained (got ${message})`);
   }
 
+  // 13. Content that renders to nothing is a cache miss too, and a blank live page is reported
+  {
+    const creds = JSON.stringify({ token: "tok", projectId: "proj" });
+    const htmlOnly = "<html><body><script>nav()</script>  </body></html>";
+
+    const blankCache = mockFetch((url, init) => {
+      if (url.endsWith(":rewriteUri")) return jsonResponse(200, {});
+      if (String(init.body ?? "").includes("liveFetch")) {
+        return jsonResponse(200, { content: "<html><body><h1>Recovered</h1></body></html>" });
+      }
+      return jsonResponse(200, { content: "  \n\t " });
+    });
+    const recovered = await executeAntigravityWebFetch({
+      apiKey: creds,
+      url: "https://example.com/blank-cache",
+    });
+    assert(recovered.source === "live", "whitespace-only cached content falls through to live");
+    assert(recovered.content.includes("# Recovered"), "live content used after blank cached content");
+    assert(
+      blankCache.calls.filter((call) => call.body.includes("liveFetch")).length === 1,
+      "exactly one live fetch after blank cached content",
+    );
+
+    const blankEverywhere = mockFetch((url) =>
+      url.endsWith(":rewriteUri")
+        ? jsonResponse(200, {})
+        : jsonResponse(200, { content: htmlOnly }),
+    );
+    let message = "";
+    try {
+      await executeAntigravityWebFetch({ apiKey: creds, url: "https://example.com/blank-html" });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    assert(
+      message.includes("returned no content"),
+      `HTML that renders to nothing reported (got ${message})`,
+    );
+    assert(
+      blankEverywhere.calls.some((call) => call.body.includes("liveFetch")),
+      "HTML that renders to nothing still tries the live fetch",
+    );
+
+    const raw = await executeAntigravityWebFetch({
+      apiKey: creds,
+      url: "https://example.com/raw-blank-html",
+      raw: true,
+    });
+    assert(raw.content.includes("<script>"), "raw mode still returns HTML that renders to nothing");
+  }
+
   console.log("web fetch: URL guards, RPC shapes, cache/live flow, markdown conversion, and caps passed");
 }
 

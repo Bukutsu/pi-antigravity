@@ -202,23 +202,27 @@ async function resolveRedirect(
   }
 }
 
-/** Convert, extract metadata, and apply the character budget. */
+/** Render fetched text the way the caller will read it: Markdown for HTML, trimmed text otherwise. */
+function renderContent(value: string, raw: boolean, baseUrl: string): string {
+  return !raw && looksLikeHtml(value) ? htmlToMarkdown(value, { baseUrl }) : value.trim();
+}
+
+/** Format the rendered page, extract metadata, and apply the character budget. */
 function toResult(params: {
   requestedUrl: string;
   resolvedUrl: string;
   content: string;
+  rendered: string;
   source: WebFetchSource;
   raw: boolean;
   maxChars: number;
 }): WebFetchResult {
-  const { requestedUrl, resolvedUrl, content, source, raw, maxChars } = params;
-  const isHtml = !raw && looksLikeHtml(content);
-  const metadata = isHtml ? extractPageMetadata(content) : {};
-  const converted = isHtml ? htmlToMarkdown(content, { baseUrl: resolvedUrl }) : content.trim();
-  const truncated = converted.length > maxChars;
+  const { requestedUrl, resolvedUrl, content, rendered, source, raw, maxChars } = params;
+  const metadata = !raw && looksLikeHtml(content) ? extractPageMetadata(content) : {};
+  const truncated = rendered.length > maxChars;
   const text = truncated
-    ? `${converted.slice(0, maxChars)}\n\n… [truncated at ${maxChars} characters; the page is ${converted.length}]`
-    : converted;
+    ? `${rendered.slice(0, maxChars)}\n\n… [truncated at ${maxChars} characters; the page is ${rendered.length}]`
+    : rendered;
   return {
     requestedUrl,
     resolvedUrl,
@@ -263,10 +267,12 @@ export async function executeAntigravityWebFetch(
         options.signal,
       );
       let content = cached.status === 200 ? parseTrawlerContent(cached.data) : undefined;
+      let rendered = content === undefined ? "" : renderContent(content, raw, resolvedUrl);
       let source: WebFetchSource = "cache";
 
-      if (!content) {
-        // A 404 and an empty 200 both mean the cache has nothing; only other statuses are errors.
+      if (!rendered.trim()) {
+        // A 404, an empty 200, and a page that renders to nothing are all cache misses; only
+        // other statuses are errors.
         if (cached.status !== 404 && cached.status !== 200) {
           throw fetchError(cached.text, cached.status);
         }
@@ -280,10 +286,13 @@ export async function executeAntigravityWebFetch(
         );
         if (live.status !== 200) throw fetchError(live.text, live.status);
         content = parseTrawlerContent(live.data);
+        rendered = content === undefined ? "" : renderContent(content, raw, resolvedUrl);
       }
 
-      if (!content) throw new Error("The fetch service returned no content for that URL.");
-      return toResult({ requestedUrl, resolvedUrl, content, source, raw, maxChars });
+      if (content === undefined || !rendered.trim()) {
+        throw new Error("The fetch service returned no content for that URL.");
+      }
+      return toResult({ requestedUrl, resolvedUrl, content, rendered, source, raw, maxChars });
     } catch (error) {
       if (options.signal?.aborted) throw error;
       if (error instanceof Error && (error as { fatal?: boolean }).fatal) throw error;
