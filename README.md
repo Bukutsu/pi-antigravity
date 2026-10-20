@@ -112,12 +112,23 @@ Review these permissions before approving access. If your credentials expire or 
 | `/antigravity.doctor` | Show sanitized provider diagnostics, including the endpoint, status, and resolved runtime model. |
 | `/antigravity.image <prompt>` | Generate an image via Antigravity and save it under `.pi/generated-images/`. Optional `--ratio 16:9`, `--model`, `--path`. |
 | `/antigravity.search <query>` | Search the web using Google Search Grounding via Antigravity. Optional `--thinking`, `--url <url>`. |
+| `/antigravity.fetch <url>` | Read a public web page through the Antigravity fetch service and print it as markdown. Optional `--raw` keeps the crawled source. |
 
 Model availability, entitlement, quota groups, and resets are returned by the service and can differ by account. The quota percentage shown for a model can represent a shared pool, not a private per-model allowance.
 
 The extension also registers a `generate_image` tool the model can call. Images are written inside the project directory (default `.pi/generated-images/`). Image generation defaults to `gemini-3.1-flash-image`; model availability is account-dependent. Requests use the direct image endpoint, with the legacy streaming endpoint tried on HTTP 404. Existing model and endpoint fallbacks remain available.
 
 It also registers a `google_search` tool allowing models to perform real-time web search and URL analysis using Google Search Grounding over Cloud Code Assist. The default model is `gemini-3.5-flash-lite` (fallbacks: `gemini-3.1-flash-lite`, `gemini-3-flash`) and the default reply is a short evidence brief. It supports optional lead agent directives (`instruction`), specific target URLs (`urls`), and deep reasoning (`thinking: true` or `/antigravity.search --thinking`).
+
+It also registers a `read_url_content` tool for public pages. Fetching runs through Google's Cloud Code Assist endpoints, so the machine never contacts the target site. The tool resolves redirects with `v1internal:rewriteUri`, reads `v1internal:fetchFromTrawlerCache`, and retries with `liveFetch: true` when the cache is missing, clearly cut off, empty, or suspected to contain only a shell or access wall. A shared 10-second network deadline bounds redirects, endpoint failover, and recovery; useful content is retained if the deadline expires or recovery fails. Short readable fragments with unknown completeness do not trigger a retry.
+
+Before converting HTML to Markdown, the tool reads page metadata, bounded JSON-LD matched to the article, and advertised alternate representations. If cache and live results are inadequate, it tries at most one same-origin Markdown or supported article-JSON representation, preferring Markdown. JSON recovery supports GitHub Docs article bodies and WordPress single-post responses with matching article identity. Inadequate MDN copies can use the publisher's same-origin `index.json` representation within the same one-representation budget. MDN's JSON may supply a canonical article URL within the same origin and locale's `/docs/` prefix; results report that redirect. Recovery requires verified publisher identity and complete supported article sections; if Google cuts only the later sidebar JSON, the source is still reported as incomplete. Unknown section types or a cut-off article body are not silently repaired. Results report the article URL, any alternate representation URL, retrieval attempts, and available title, author, publication date, modification date, and language. Structured data is parsed, never executed.
+
+Conversion keeps headings, lists, links, code blocks, and data tables. It selects `<main>`, a `role="main"` region, or a single `<article>`, then removes navigation and hidden decorations. Source completeness, suspected content problems, and our own output truncation are reported separately. A closed HTML document is not proof that Google supplied the entire article. Empty results do not establish that the page requires JavaScript: Google's response may be cut off, blocked, or a shell.
+
+Output is capped by `ANTIGRAVITY_WEB_FETCH_MAX_CHARS` (default 60000). The model-facing tool returns a `snapshot` and `nextOffset` for continuation reads from the same captured rendering: call it with `{ snapshot, offset: nextOffset }` instead of `{ url }`. Captures stay in memory for ten minutes, with at most four documents of up to two million characters each. Session changes and reloads invalidate them; oversized documents are returned without snapshot support. Continuations do not need credentials or another network request. The final range means the end of the captured copy, not verified full-page coverage.
+
+`/antigravity.fetch [--raw] <url>` exposes the same fetch interactively. Raw mode preserves the requested page's crawled source and does not substitute alternate representations. Private, local, credential-bearing, and non-HTTP URLs are refused. PDF URLs are unsupported; open them in a browser. This remains a best-effort Google crawler tool, without a local HTTP or browser fallback, cookies, or login support.
 
 ### Native image API
 
@@ -194,11 +205,13 @@ All primary environment variables start with `ANTIGRAVITY_`. The legacy `NOAGY_`
 | `ANTIGRAVITY_CLIENT_SECRET` | Use a custom Google OAuth client secret. Keep it out of source control and shell history. |
 | `ANTIGRAVITY_NO_KEEPALIVE` | Set to `1` to skip the keep-alive connection pool. |
 | `ANTIGRAVITY_NO_PREWARM` | Set to `1` to skip the TLS pre-warm request made on the first Antigravity request. |
-| `ANTIGRAVITY_NO_EXTRA_TOOLS` | Set to `1` to stop registering the model-facing `google_search` and `generate_image` tools. The `/antigravity.search` and `/antigravity.image` commands stay available. |
+| `ANTIGRAVITY_NO_EXTRA_TOOLS` | Set to `1` to stop registering the model-facing `google_search`, `read_url_content`, and `generate_image` tools. The `/antigravity.search`, `/antigravity.fetch`, and `/antigravity.image` commands stay available. |
 | `ANTIGRAVITY_NO_SEARCH_TOOL` | Set to `1` to skip only the `google_search` tool, e.g. when another extension provides web search. |
+| `ANTIGRAVITY_NO_FETCH_TOOL` | Set to `1` to skip only the `read_url_content` tool, e.g. when another extension already fetches URLs. |
 | `ANTIGRAVITY_NO_IMAGE_TOOL` | Set to `1` to skip only the `generate_image` tool. |
+| `ANTIGRAVITY_WEB_FETCH_MAX_CHARS` | Character budget for one `read_url_content` result. Defaults to 60000, roughly 15k tokens. |
 
-`pi config` can disable each model-facing tool without disabling the provider. The package loads three extension resources: `src/index.ts` (provider, OAuth, and slash commands), `src/features/google-search.ts` (`google_search`), and `src/features/generate-image.ts` (`generate_image`). Turn off a feature resource there to stop registering that tool. `/antigravity.search` and `/antigravity.image` stay available from the provider extension.
+`pi config` can disable each model-facing tool without disabling the provider. The package loads four extension resources: `src/index.ts` (provider, OAuth, and slash commands), `src/features/google-search.ts` (`google_search`), `src/features/read-url-content.ts` (`read_url_content`), and `src/features/generate-image.ts` (`generate_image`). Turn off a feature resource there to stop registering that tool. `/antigravity.search`, `/antigravity.fetch`, and `/antigravity.image` stay available from the provider extension.
 
 Environment variables still force a loaded tool off, including in scripts and headless runs. They cannot turn a resource back on after `pi config` disables it, because that file is not loaded. Either control is enough to hide the tool from the model. Run `/reload` after changing `pi config` or the environment in an active session; a new Pi process also picks the change up. A restart is not required when `/reload` succeeds.
 
@@ -231,6 +244,8 @@ corepack enable
 yarn install
 yarn check
 ```
+
+For an optional live fetch check, run `yarn smoke:fetch` after `/login antigravity`. It exercises the registered tool on three public URLs and checks that snapshot continuation uses neither network nor credentials. It uses saved Pi credentials (`PI_AUTH_PATH` can select another auth file), saves no captures, and is excluded from `yarn check` and default CI. Exit codes: 0 for successful coverage, 1 for integration failures, 2 when no page passes or snapshot continuation cannot be checked. Upstream errors and changed page content are reported as warnings.
 
 Installs are hardened against common supply-chain attacks: lifecycle scripts are off, lockfile checksums must match the npm registry, and package versions younger than three days are rejected. Do not add a second registry or enable `enableScripts` without a review.
 

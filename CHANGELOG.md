@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`read_url_content` tool:** Reads public pages through Google's Antigravity fetch service and converts HTML to Markdown. Inadequate cached copies retry live, with useful cached content retained on recovery failure. The tool inspects metadata and article-matched JSON-LD before cleanup, and can recover through one advertised same-origin Markdown or supported article-JSON representation. Results distinguish source completeness, suspected content problems, and output truncation, and report retrieval attempts and provenance. Long captures support bounded, session-local snapshot reads without refetching. `/antigravity.fetch [--raw] <url>` exposes interactive fetching; raw mode preserves the crawled source. Disable with `ANTIGRAVITY_NO_FETCH_TOOL=1`, `ANTIGRAVITY_NO_EXTRA_TOOLS=1`, or the `read-url-content` resource in `pi config`.
+
+### Fixed
+
+- **Web fetch diagnostics and bounds:** A shared 10-second network deadline limits endpoint retries while retaining useful captures. MDN JSON can resolve old article paths to canonical URLs. Unclosed article regions in HTML documents are flagged incomplete, module-script shells get a browser explanation, Markdown headings supply titles, and Hacker News front-page stories render as linked lists. PDF URLs return an unsupported-format message.
+- **MDN article recovery:** Inadequate page copies can use MDN's same-origin article JSON. Complete, identity-matched prose and specification sections are extracted even when Google's copy ends inside the later sidebar. The source remains marked incomplete; missing article data is never reconstructed.
+
 ## [0.11.0] - 2026-10-16
 
 ### Added

@@ -8,6 +8,7 @@ import {
   parseApiKey,
 } from "../client/client.js";
 import { AntigravityRequestType, AntigravityUserAgent, GeminiRole } from "../types/enums.js";
+import { decodeHtmlEntities } from "../utils/html.js";
 import { antigravityFetch } from "../utils/http.js";
 import { safeError } from "../utils/security.js";
 import { antigravityEnv, antigravityRequestEnvelope, isRecord } from "../utils/util.js";
@@ -427,21 +428,6 @@ function readablePath(url: string | undefined): string {
   } catch {
     return "";
   }
-}
-
-/** Turn the handful of entities that appear in title text back into characters. */
-function decodeHtmlEntities(text: string): string {
-  return text
-    .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, code: string) => String.fromCodePoint(parseInt(code, 16)))
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;|&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 /**
