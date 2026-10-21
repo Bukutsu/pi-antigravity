@@ -128,7 +128,7 @@ Conversion keeps headings, lists, links, code blocks, and data tables. It select
 
 Output is capped by `ANTIGRAVITY_WEB_FETCH_MAX_CHARS` (default 60000). The model-facing tool returns a `snapshot` and `nextOffset` for continuation reads from the same captured rendering: call it with `{ snapshot, offset: nextOffset }` instead of `{ url }`. Captures stay in memory for ten minutes, with at most four documents of up to two million characters each. Session changes and reloads invalidate them; oversized documents are returned without snapshot support. Continuations do not need credentials or another network request. The final range means the end of the captured copy, not verified full-page coverage.
 
-`/antigravity.fetch [--raw] <url>` exposes the same fetch interactively. Raw mode preserves the requested page's crawled source and does not substitute alternate representations. Private, local, credential-bearing, and non-HTTP URLs are refused. PDF URLs are unsupported; open them in a browser. This remains a best-effort Google crawler tool, without a local HTTP or browser fallback, cookies, or login support.
+`/antigravity.fetch [--raw] <url>` exposes the same fetch interactively. Raw mode preserves the requested page's crawled source and does not substitute alternate representations. Private, local, credential-bearing, and non-HTTP URLs are refused. PDF URLs fail immediately with guidance to download the URL directly and read the local file with an available PDF reader, subject to normal permissions. The tool itself does not download or extract PDFs. This remains a best-effort Google crawler tool, without a local HTTP or browser fallback, cookies, or login support.
 
 ### Native image API
 

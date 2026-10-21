@@ -384,7 +384,11 @@ export async function executeAntigravityWebFetch(
 ): Promise<WebFetchResult> {
   const requestedUrl = validateFetchTarget(options.url);
   if (/\.pdf$/i.test(new URL(requestedUrl).pathname))
-    throw new Error("PDF URLs are not supported by read_url_content. Open the PDF in a browser.");
+    throw new Error(
+      "This tool does not support PDF content. Do not retry this URL with read_url_content. " +
+        "If permitted, use an available download tool or terminal to download it directly, then read the local file with a PDF reader. " +
+        "Downloading alone does not extract its text.",
+    );
   const deadline = AbortSignal.timeout(WEB_FETCH_TIMEOUT_MS);
   const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
   const creds = parseApiKey(options.apiKey);
