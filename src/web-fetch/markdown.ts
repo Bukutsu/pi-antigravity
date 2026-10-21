@@ -76,8 +76,43 @@ export function extractPageMetadata(html: string): PageMetadata {
 
 /** Leave plain text, JSON, and already-Markdown responses alone. */
 export function looksLikeHtml(text: string): boolean {
+  if (/^\s*[{"[]/.test(text)) {
+    try {
+      JSON.parse(text);
+      return false;
+    } catch {
+      // A leading bracket alone does not establish JSON.
+    }
+  }
+  let fence: { marker: string; length: number } | undefined;
+  const prose: string[] = [];
+  for (const line of text.slice(0, 4000).split("\n")) {
+    const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence) {
+      if (
+        delimiter &&
+        delimiter[1][0] === fence.marker &&
+        delimiter[1].length >= fence.length &&
+        !delimiter[2].trim()
+      )
+        fence = undefined;
+    } else if (delimiter && !(delimiter[1][0] === "`" && delimiter[2].includes("`"))) {
+      fence = { marker: delimiter[1][0], length: delimiter[1].length };
+    } else prose.push(line);
+  }
+  const source = prose.join("\n").replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, "");
+  // Markdown can include HTML decorations without becoming an HTML document.
+  if (/^ {0,3}#{1,6}\s/m.test(source) && !/<!doctype\b|<(?:html|head|body)\b/i.test(source)) {
+    const body = createDocument(source).body;
+    if (
+      Array.from(body.childNodes).some(
+        (node) => node.nodeType === 3 && /^ {0,3}#{1,6}\s/m.test(node.textContent ?? ""),
+      )
+    )
+      return false;
+  }
   return /<!doctype\b[^<>]*>|<\/?(?:a|address|article|aside|audio|b|blockquote|body|br|button|canvas|caption|code|dd|details|div|dl|dt|em|fieldset|figcaption|figure|footer|form|h[1-6]|head|header|hr|html|i|iframe|img|input|label|legend|li|link|main|meta|nav|ol|option|p|pre|section|select|small|source|span|strong|style|sub|summary|sup|table|tbody|td|textarea|tfoot|th|thead|time|title|tr|u|ul|video)\b[^<>]*>/i.test(
-    text.slice(0, 4000),
+    source,
   );
 }
 
@@ -205,27 +240,6 @@ function resolveTarget(target: string, baseUrl?: string): string {
   }
 }
 
-function sameLanguage(first: string, second: string): boolean {
-  const parts = (tag: string) => {
-    const subtags = tag.toLowerCase().split("-");
-    return {
-      language: subtags[0],
-      script: subtags.slice(1).find((part) => /^[a-z]{4}$/.test(part)),
-      variants: subtags
-        .slice(1)
-        .filter((part) => /^[a-z0-9]{5,8}$/.test(part) || /^[0-9][a-z0-9]{3}$/.test(part)),
-    };
-  };
-  const left = parts(first);
-  const right = parts(second);
-  return (
-    left.language === right.language &&
-    (!left.script || !right.script || left.script === right.script) &&
-    ((left.variants.length === 0 && right.variants.length === 0) ||
-      left.variants.join("-") === right.variants.join("-"))
-  );
-}
-
 /** Whether an inline style explicitly hides its element. */
 function isHiddenStyle(style: string | null): boolean {
   return (
@@ -299,58 +313,82 @@ function hasTableAncestor(table: HTMLTableElement): boolean {
   return false;
 }
 
+/** Flatten unsupported grids without discarding links, images, or inline code. */
+function flattenTable(table: HTMLTableElement, document: Document): void {
+  const flattened = document.createElement("span");
+  const caption = table.querySelector("caption");
+  if (caption) {
+    for (const child of Array.from(caption.childNodes))
+      flattened.appendChild(child.cloneNode(true));
+    flattened.appendChild(document.createTextNode(" — "));
+  }
+  const rows = Array.from(table.rows).filter(
+    (row) => belongsToTable(row, table) && tableRowHasContent(row),
+  );
+  rows.forEach((row, rowIndex) => {
+    flattened.appendChild(document.createTextNode(rowIndex ? "; " : " "));
+    Array.from(row.cells)
+      .filter(tableCellHasContent)
+      .forEach((cell, cellIndex) => {
+        if (cellIndex) flattened.appendChild(document.createTextNode(" — "));
+        for (const child of Array.from(cell.childNodes))
+          flattened.appendChild(child.cloneNode(true));
+      });
+  });
+  flattened.appendChild(document.createTextNode(" "));
+  table.replaceWith(flattened);
+}
+
 function flattenNestedTables(root: Element, document: Document): void {
   for (const table of Array.from(root.querySelectorAll("table")).reverse()) {
-    if (!hasTableAncestor(table)) continue;
-    const rows = Array.from(table.rows).filter(
-      (row) => belongsToTable(row, table) && tableRowHasContent(row),
-    );
-    const text = rows
-      .map((row) =>
-        Array.from(row.cells)
-          .map((cell) => cell.textContent?.trim() ?? "")
-          .filter(Boolean)
-          .join(" — "),
-      )
-      .filter(Boolean)
-      .join("; ");
-    table.replaceWith(document.createTextNode(text ? ` ${text} ` : ""));
+    if (hasTableAncestor(table)) flattenTable(table, document);
   }
 }
 
-function normalizeTableRows(table: HTMLTableElement, document: Document): HTMLTableRowElement[] {
+const MAX_TABLE_GRID_CELLS = 10_000;
+
+function normalizeTableRows(
+  table: HTMLTableElement,
+  document: Document,
+  maxGridCells: number,
+): HTMLTableRowElement[] | undefined {
   const rows = Array.from(table.rows).filter((row) => belongsToTable(row, table));
+  const groupEnds = new Map<Node | null, number>();
+  rows.forEach((row, index) => groupEnds.set(row.parentNode, index));
   const occupiedUntil = new Map<number, number>();
   const placements: Array<Array<{ cell: HTMLTableCellElement; column: number; span: number }>> =
     rows.map(() => []);
   let width = 0;
 
-  rows.forEach((row, rowIndex) => {
-    if (!tableRowHasContent(row)) return;
+  for (const [rowIndex, row] of rows.entries()) {
     let column = 0;
     for (const cell of Array.from(row.cells)) {
-      if (!tableCellHasContent(cell) && cell.rowSpan > 1) continue;
       const span = Math.max(1, cell.colSpan);
-      while (
-        Array.from(
-          { length: span },
-          (_value, offset) => occupiedUntil.get(column + offset) ?? -1,
-        ).some((lastRow) => lastRow >= rowIndex)
-      ) {
-        column += 1;
+      for (;;) {
+        if ((column + span) * rows.length > maxGridCells) return undefined;
+        let blocked: number | undefined;
+        for (let offset = 0; offset < span; offset += 1) {
+          if ((occupiedUntil.get(column + offset) ?? -1) >= rowIndex) {
+            blocked = column + offset;
+            break;
+          }
+        }
+        if (blocked === undefined) break;
+        column = blocked + 1;
       }
       placements[rowIndex].push({ cell, column, span });
+      const remainingRows = groupEnds.get(row.parentNode)! - rowIndex + 1;
       const rowSpan = Math.min(
-        rows.length - rowIndex,
-        cell.rowSpan === 0 ? rows.length - rowIndex : Math.max(1, cell.rowSpan),
+        remainingRows,
+        cell.rowSpan === 0 ? remainingRows : Math.max(1, cell.rowSpan),
       );
       for (let offset = 0; offset < span; offset += 1) {
         occupiedUntil.set(column + offset, rowIndex + rowSpan - 1);
       }
       column += span;
     }
-    if (tableRowHasContent(row)) width = Math.max(width, column);
-  });
+    width = Math.max(width, column);
+  }
 
   rows.forEach((row, rowIndex) => {
     const placed = new Map(placements[rowIndex].map((item) => [item.column, item]));
@@ -421,7 +459,6 @@ export function htmlToMarkdown(html: string, { baseUrl }: HtmlToMarkdownOptions 
   // Mozilla Readability recommends isolating its mutating extraction on a clone (Apache-2.0):
   // https://github.com/mozilla/readability. This parse already owns a disposable DOM.
   const document = createDocument(html);
-  const language = (document.documentElement.lang || document.body.lang).toLowerCase();
   for (const node of Array.from(document.querySelectorAll(DROPPED_ELEMENTS))) node.remove();
   for (const node of Array.from(document.querySelectorAll("[hidden], [aria-hidden], [style]"))) {
     if (
@@ -444,7 +481,6 @@ export function htmlToMarkdown(html: string, { baseUrl }: HtmlToMarkdownOptions 
 
   for (const link of Array.from(root.querySelectorAll("a"))) {
     link.removeAttribute("title");
-    const declared = (link.getAttribute("hreflang") || link.getAttribute("lang"))?.toLowerCase();
     const href = link.getAttribute("href")?.trim();
     const textLabel = link.textContent?.trim() ?? "";
     const ariaLabel = link.getAttribute("aria-label")?.trim() ?? "";
@@ -454,10 +490,7 @@ export function htmlToMarkdown(html: string, { baseUrl }: HtmlToMarkdownOptions 
       link.remove();
       continue;
     }
-    if (
-      (language && declared && !sameLanguage(language, declared)) ||
-      (href?.startsWith("#") && (!/[\p{L}\p{N}]/u.test(label) || /^skip\b/i.test(label)))
-    ) {
+    if (href?.startsWith("#") && (!/[\p{L}\p{N}]/u.test(label) || /^skip\b/i.test(label))) {
       link.remove();
     } else if (
       href?.startsWith("#") ||
@@ -504,21 +537,26 @@ export function htmlToMarkdown(html: string, { baseUrl }: HtmlToMarkdownOptions 
   }
   flattenNestedTables(root, document);
   // Give the GFM plugin a rectangular table with an explicit header section.
+  let remainingTableCells = MAX_TABLE_GRID_CELLS;
   for (const table of Array.from(root.querySelectorAll("table"))) {
-    const rows = normalizeTableRows(table, document).filter(tableRowHasContent);
+    const normalized = normalizeTableRows(table, document, remainingTableCells);
+    if (!normalized) {
+      flattenTable(table, document);
+      continue;
+    }
+    remainingTableCells -= normalized.length * (normalized[0]?.cells.length ?? 0);
+    const rows = normalized.filter(tableRowHasContent);
     if (!rows.length || (!table.textContent?.trim() && !table.querySelector("img"))) {
       table.remove();
       continue;
     }
-    const width = Math.max(...rows.map((row) => row.cells.length));
-    for (const row of rows) {
-      while (row.cells.length < width) row.appendChild(document.createElement("td"));
-    }
+    const width = rows[0].cells.length;
     const first = rows[0];
     const header = Array.from(first.cells).every((cell) => cell.tagName === "TH")
       ? rows.shift()!
       : document.createElement("tr");
-    while (header.cells.length < width) header.appendChild(document.createElement("th"));
+    for (let column = header.cells.length; column < width; column += 1)
+      header.appendChild(document.createElement("th"));
     const head = document.createElement("thead");
     const body = document.createElement("tbody");
     head.appendChild(header);
@@ -526,7 +564,8 @@ export function htmlToMarkdown(html: string, { baseUrl }: HtmlToMarkdownOptions 
     const sourceCaption = table.querySelector("caption");
     if (sourceCaption) {
       const caption = document.createElement("p");
-      caption.textContent = sourceCaption.textContent;
+      for (const child of Array.from(sourceCaption.childNodes))
+        caption.appendChild(child.cloneNode(true));
       table.parentNode!.insertBefore(caption, table);
     }
     table.textContent = "";

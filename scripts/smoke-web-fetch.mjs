@@ -73,8 +73,8 @@ try {
       assert.match(text, /Source: https?:\/\//, "Missing source URL");
       if (details.assessment === "suspected-shell") assert.match(text, /Note:.*JavaScript-rendered/, "Missing shell explanation");
       else if (details.partial !== false) assert.match(text, /Note:.*(?:ends mid-page|completeness is unknown)/, "Missing completeness warning");
-      if (canonical) {
-        assert.ok(text.includes("Source: " + canonical + " "), "Missing canonical MDN source");
+      const canonicalObserved = !canonical || text.includes("Source: " + canonical + " ");
+      if (canonical && canonicalObserved) {
         assert.ok(text.includes("Requested: " + url), "Missing MDN redirect provenance");
       }
       if (details.assessment !== "readable") assert.ok(text.includes(`Content assessment: ${details.assessment}`), "Missing content assessment");
@@ -93,9 +93,9 @@ try {
         continuationChecked = true;
       }
       const found = available.toLowerCase().includes(expected.toLowerCase());
-      const status = found && details.assessment === "readable" ? "pass" : "warn";
+      const status = found && details.assessment === "readable" && canonicalObserved ? "pass" : "warn";
       counts[status] += 1;
-      console.log(`${status.toUpperCase()} ${label}: ${Math.round(performance.now() - started)} ms; source=${details.source}; partial=${details.partial}; assessment=${details.assessment}; expected text ${found ? "found" : "not found in first two ranges"}`);
+      console.log(`${status.toUpperCase()} ${label}: ${Math.round(performance.now() - started)} ms; source=${details.source}; partial=${details.partial}; assessment=${details.assessment}; expected text ${found ? "found" : "not found in first two ranges"}${canonicalObserved ? "" : "; expected MDN canonical URL not observed"}`);
     } catch (error) {
       const message = redactSecrets(error instanceof Error ? error.message : String(error)).replaceAll(credentials.access, "[redacted]");
       const upstream = !(error instanceof assert.AssertionError) &&

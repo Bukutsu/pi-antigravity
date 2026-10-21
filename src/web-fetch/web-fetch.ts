@@ -1,9 +1,8 @@
 /**
  * Read a public page through Google's Antigravity fetch service.
  *
- * The official `agy` CLI serves its `read_url_content` tool from two Cloud Code Assist
- * RPCs rather than from a local HTTP client, so the crawl happens on Google's side and
- * the account's OAuth token is the only credential involved:
+ * This integration uses the Google-only retrieval path observed in the official `agy`
+ * CLI. The crawl runs on Google's side using the account's OAuth token:
  *
  *   1. `v1internal:rewriteUri` resolves a redirect chain and reports the final URI.
  *   2. `v1internal:fetchFromTrawlerCache` answers from Google's crawl cache, and a
@@ -12,7 +11,8 @@
  *
  * The response is crawled source, usually HTML. Inspection preserves metadata and
  * recovery links before Markdown cleanup; output is capped before reaching a model.
- * No local HTTP client or JavaScript renderer contacts the target site.
+ * No local HTTP client or JavaScript renderer contacts the target site. The official
+ * CLI's direct-download fallback is not implemented here.
  */
 import {
   antigravityHeaders,
@@ -120,6 +120,16 @@ export function validateFetchTarget(raw: string): string {
   return parsed.toString();
 }
 
+/** Reject known PDF URLs with guidance for the calling agent. */
+function rejectPdfUrl(url: string): void {
+  if (/\.pdf$/i.test(new URL(url).pathname))
+    throw new Error(
+      "This tool does not support PDF content. Do not retry this URL with read_url_content. " +
+        "If permitted, use an available download tool or terminal to download it directly, then read the local file with a PDF reader. " +
+        "Downloading alone does not extract its text.",
+    );
+}
+
 /** Request body for the redirect resolver. */
 export function buildRewriteUriRequest(originalUri: string): Record<string, unknown> {
   return { originalUri };
@@ -154,11 +164,11 @@ export function parseTrawlerContent(data: unknown): string | undefined {
 
 /** Character budget, from the caller or `ANTIGRAVITY_WEB_FETCH_MAX_CHARS`. */
 export function resolveMaxChars(explicit?: number): number {
-  if (typeof explicit === "number" && Number.isFinite(explicit) && explicit > 0) {
+  if (typeof explicit === "number" && Number.isSafeInteger(Math.floor(explicit)) && explicit >= 1) {
     return Math.floor(explicit);
   }
   const configured = Number(antigravityEnv("WEB_FETCH_MAX_CHARS"));
-  return Number.isFinite(configured) && configured > 0
+  return Number.isSafeInteger(Math.floor(configured)) && configured >= 1
     ? Math.floor(configured)
     : DEFAULT_WEB_FETCH_MAX_CHARS;
 }
@@ -202,7 +212,7 @@ function fetchError(text: string, status: number, stage: "cache" | "live"): Erro
   return Object.assign(new Error(message), { fatal: status < 500 && status !== 429, status });
 }
 
-/** Ask the service where a URL really points, ignoring resolver failures. */
+/** Resolve best-effort, but reject any unsafe destination the service reports. */
 async function resolveRedirect(
   endpoint: string,
   url: string,
@@ -210,6 +220,7 @@ async function resolveRedirect(
   signal?: AbortSignal,
   strict = false,
 ): Promise<string | undefined> {
+  let redirect: string | undefined;
   try {
     const response = await postJson(
       endpoint,
@@ -222,14 +233,12 @@ async function resolveRedirect(
       if (strict) throw new Error(`Alternate redirect resolver failed (HTTP ${response.status}).`);
       return undefined;
     }
-    const redirect = parseRedirectUri(response.data);
-    if (!redirect || redirect === url) return undefined;
-    return validateFetchTarget(redirect);
+    redirect = parseRedirectUri(response.data);
   } catch (error) {
     // Original-page resolution is best-effort. Alternate recovery must fail closed.
     if (strict) throw error;
-    return undefined;
   }
+  return redirect && redirect !== url ? validateFetchTarget(redirect) : undefined;
 }
 
 /** Return an unmatched fenced-code delimiter, if the Markdown ends inside one. */
@@ -383,12 +392,7 @@ export async function executeAntigravityWebFetch(
   options: WebFetchOptions,
 ): Promise<WebFetchResult> {
   const requestedUrl = validateFetchTarget(options.url);
-  if (/\.pdf$/i.test(new URL(requestedUrl).pathname))
-    throw new Error(
-      "This tool does not support PDF content. Do not retry this URL with read_url_content. " +
-        "If permitted, use an available download tool or terminal to download it directly, then read the local file with a PDF reader. " +
-        "Downloading alone does not extract its text.",
-    );
+  rejectPdfUrl(requestedUrl);
   const deadline = AbortSignal.timeout(WEB_FETCH_TIMEOUT_MS);
   const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
   const creds = parseApiKey(options.apiKey);
@@ -423,6 +427,7 @@ export async function executeAntigravityWebFetch(
     const resolvedUrl =
       (await resolveRedirect(endpoint, requestedUrl, headers, signal)) ?? requestedUrl;
     aborted();
+    rejectPdfUrl(resolvedUrl);
     let page: Candidate | undefined;
     let alternatePage: Candidate | undefined;
     for (const source of ["cache", "live"] as const) {

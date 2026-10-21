@@ -369,12 +369,18 @@ export function isPrivateAddress(address: string): boolean {
     return a >= 224; // multicast, then reserved
   }
   if (version === 6) {
-    const lowered = bare.toLowerCase();
+    const lowered = new URL(`http://[${bare}]/`).hostname.slice(1, -1);
     if (lowered === "::" || lowered === "::1") return true;
     if (/^f[cd]/.test(lowered)) return true; // unique local
     if (/^fe[89ab]/.test(lowered)) return true; // link-local
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lowered)?.[1];
-    return mapped ? isPrivateAddress(mapped) : false;
+    // URL canonicalization renders mapped IPv4 addresses as two hexadecimal words.
+    const mapped = /^::ffff:([0-9a-f]+):([0-9a-f]+)$/.exec(lowered);
+    if (!mapped) return false;
+    const octets = mapped.slice(1).flatMap((word) => {
+      const value = parseInt(word, 16);
+      return [value >> 8, value & 255];
+    });
+    return isPrivateAddress(octets.join("."));
   }
   return false;
 }
