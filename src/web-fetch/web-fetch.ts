@@ -22,27 +22,16 @@ import {
 } from "../client/client.js";
 import { checkPublicUrl } from "../utils/address.js";
 import { antigravityFetch } from "../utils/http.js";
-import {
-  boundaryBack,
-  boundaryForward,
-  capText,
-  cleanText,
-  elideMiddle,
-  repairText,
-} from "../utils/text.js";
+import { boundaryForward, capText, cleanText, elideMiddle, repairText } from "../utils/text.js";
 import { redactSecrets, safeError } from "../utils/security.js";
 import { antigravityEnv, isRecord } from "../utils/util.js";
 import { looksLikeHtml } from "./markdown.js";
 
 import { articleRepresentation, inspectPage, type PageInspection } from "./inspect.js";
 import { inspectMdnRepresentation, mdnRepresentationUrl } from "./mdn.js";
+import { siteRepresentation } from "./sites.js";
 import { mediaKind } from "./media.js";
-import {
-  DEFAULT_WEB_FETCH_MAX_CHARS,
-  WEB_FETCH_TIMEOUT_MS,
-  MAX_RESPONSE_BYTES,
-  MAX_SNAPSHOT_CHARS,
-} from "./limits.js";
+import { DEFAULT_WEB_FETCH_MAX_CHARS, WEB_FETCH_TIMEOUT_MS, MAX_RESPONSE_BYTES } from "./limits.js";
 import { formatWebFetchHeader } from "./header.js";
 import { FENCE_LINE, unclosedFence } from "./fences.js";
 import {
@@ -57,7 +46,7 @@ import {
 export const REWRITE_URI_PATH = "/v1internal:rewriteUri";
 export const TRAWLER_FETCH_PATH = "/v1internal:fetchFromTrawlerCache";
 
-export { DEFAULT_WEB_FETCH_MAX_CHARS, WEB_FETCH_TIMEOUT_MS, MAX_SNAPSHOT_CHARS } from "./limits.js";
+export { DEFAULT_WEB_FETCH_MAX_CHARS, WEB_FETCH_TIMEOUT_MS } from "./limits.js";
 export { formatWebFetchHeader } from "./header.js";
 
 export type WebFetchSource = "cache" | "live";
@@ -113,8 +102,6 @@ export type WebFetchResult = {
   }>;
   /** Character budget used for this result, including header and footer space. */
   maxChars?: number;
-  /** Uncapped rendering for bounded, in-memory continuation reads. Not model-facing. */
-  fullContent?: string;
 };
 
 /**
@@ -429,13 +416,6 @@ function safeTruncate(text: string, end: number, start = 0): number {
   return next;
 }
 
-/** Respect the source cursor; only repair a cut inside a surrogate pair. */
-function safeOffset(text: string, offset: number): number {
-  if (offset <= 0) return 0;
-  if (offset >= text.length) return text.length;
-  return boundaryBack(text, offset);
-}
-
 /** Format the rendered page, extract metadata, and apply the character budget. */
 function toResult(params: {
   requestedUrl: string;
@@ -449,7 +429,7 @@ function toResult(params: {
   attempts: NonNullable<WebFetchResult["attempts"]>;
 }): WebFetchResult {
   const { requestedUrl, resolvedUrl, content, source, maxChars, inspection } = params;
-  // Redact caller/service URLs wherever the page echoes them, before snapshot offsets exist.
+  // Redact caller/service URLs wherever the page echoes them, before the page is shown or saved.
   let rendered = repairText(params.rendered);
   for (const url of [requestedUrl, resolvedUrl, params.representationUrl]) {
     if (url) rendered = rendered.replaceAll(url, redactSecrets(url));
@@ -484,39 +464,6 @@ function toResult(params: {
     ...provisional,
     bytes: new TextEncoder().encode(content).byteLength,
     truncated: rendered.length + formatWebFetchHeader(provisional).length > maxChars,
-    fullContent: rendered.length <= MAX_SNAPSHOT_CHARS ? rendered : undefined,
-  };
-}
-
-/** Read a character range from a captured rendering, with independently closed code fences. */
-export function readCapturedPage(
-  result: WebFetchResult,
-  offset = 0,
-  maxChars = DEFAULT_WEB_FETCH_MAX_CHARS,
-): {
-  result: WebFetchResult;
-  offset: number;
-  nextOffset?: number;
-  totalChars: number;
-} {
-  const text = result.fullContent;
-  if (text === undefined) throw new Error("This result has no captured rendering.");
-  if (!Number.isSafeInteger(offset))
-    throw new Error("Offset must be a whole number. Use the returned nextOffset.");
-  if (offset < 0 || offset >= text.length)
-    throw new Error("Offset is outside the captured page. Use the returned nextOffset.");
-  if (!Number.isSafeInteger(maxChars) || maxChars < 1)
-    throw new Error("Page size must be a positive integer.");
-  offset = safeOffset(text, offset);
-  const end = safeTruncate(text, offset + maxChars, offset);
-  const fence = unclosedFence(text.slice(0, offset));
-  const prefix = fence ? fence.prefix + fence.marker.repeat(fence.length) + "\n" : "";
-  const content = keepFencesClosed(prefix + text.slice(offset, end));
-  return {
-    result: { ...result, content, truncated: end < text.length },
-    offset,
-    nextOffset: end < text.length ? end : undefined,
-    totalChars: text.length,
   };
 }
 
@@ -566,7 +513,11 @@ function candidateRank(candidate: Candidate): number {
 function needsRecovery(candidate: Candidate): boolean {
   return (
     candidate.inspection.assessment !== "readable" ||
-    candidate.inspection.completeness === "incomplete"
+    candidate.inspection.completeness === "incomplete" ||
+    // Google cuts these sites' ordinary pages; only a verified copy is complete.
+    (candidate.inspection.completeness !== "complete" &&
+      !candidate.representationUrl &&
+      siteRepresentation(candidate.resolvedUrl) !== undefined)
   );
 }
 
@@ -641,6 +592,9 @@ async function fetchPage(options: WebFetchOptions): Promise<WebFetchResult> {
   const attempts: NonNullable<WebFetchResult["attempts"]> = [];
   let best: Candidate | undefined;
   let lastError = "no endpoint available";
+  // Google's copy, kept when it is beyond the conversion limits so the caller can save it.
+  let unconvertedCopy: string | undefined;
+  let lastContent: string | undefined;
   let requests = 0;
   let endpointAnswered: boolean;
   let alternateTried = false;
@@ -761,6 +715,7 @@ async function fetchPage(options: WebFetchOptions): Promise<WebFetchResult> {
         const contentType = parseTrawlerContentType(response.data);
         if (isPdfContentType(contentType)) throw pdfError();
         const content = parseTrawlerContent(response.data);
+        lastContent = content;
         if (content === undefined) {
           attempt.outcome = "empty response";
           lastError = /error|message/i.test(response.text)
@@ -794,15 +749,22 @@ async function fetchPage(options: WebFetchOptions): Promise<WebFetchResult> {
         )
           throw new WebFetchError(requestedUrl, safeError(error), attempts);
         lastError = capText(repairText(safeError(error)), 400);
-        if (!endpointAnswered || (error instanceof Error && /convert safely/.test(error.message)))
-          break;
+        const unconvertible = error instanceof Error && /convert safely/.test(error.message);
+        if (unconvertible && lastContent) {
+          unconvertedCopy = repairText(lastContent);
+          for (const url of [requestedUrl, resolvedUrl])
+            unconvertedCopy = unconvertedCopy.replaceAll(url, redactSecrets(url));
+        }
+        if (!endpointAnswered || unconvertible) break;
       }
     }
     // Raw mode means the requested page source, not a substituted representation.
     const discovery = alternatePage ?? page;
     const mdnUrl = mdnRepresentationUrl(resolvedUrl);
+    const site = siteRepresentation(resolvedUrl);
     const alternate = !options.raw
       ? (discovery?.inspection.alternates[0] ??
+        site ??
         (mdnUrl ? { url: mdnUrl, type: "application/json" as const } : undefined))
       : undefined;
     if (alternate && discovery && !deadline.aborted && !alternateTried) {
@@ -813,10 +775,15 @@ async function fetchPage(options: WebFetchOptions): Promise<WebFetchResult> {
         const url = validateFetchTarget(alternate.url);
         rejectPdfUrl(url);
         // Resolve explicitly, so advertised links cannot redirect recovery to a different origin.
-        const redirected = await resolveRedirect(endpoint, url, headers, signal, true, request);
+        // A known site copy is fetched as built: Google rewrites GitHub file pages back to raw.
+        const redirected =
+          site && alternate.url === site.url
+            ? undefined
+            : await resolveRedirect(endpoint, url, headers, signal, true, request);
         aborted();
         if (deadline.aborted) break;
-        if (redirected && new URL(redirected).origin !== new URL(resolvedUrl).origin) {
+        // Advertised links share the page's origin; a known site copy keeps its own.
+        if (redirected && new URL(redirected).origin !== new URL(alternate.url).origin) {
           attempts.push({
             url: cleanText(redactSecrets(url), 2_048)!,
             source: "live",
@@ -855,21 +822,32 @@ async function fetchPage(options: WebFetchOptions): Promise<WebFetchResult> {
               content !== undefined && alternate.url === mdnUrl
                 ? inspectMdnRepresentation(content, resolvedUrl)
                 : undefined;
+            const siteCopy =
+              content !== undefined && site && alternate.url === site.url
+                ? site.extract(content)
+                : undefined;
             const reportedType = parseTrawlerContentType(response.data);
             const jsonRepresentation =
-              mediaKind(reportedType) === "json" ||
-              (alternate.type === "application/json" && /^\s*[{[]/.test(content ?? ""));
+              !siteCopy &&
+              (mediaKind(reportedType) === "json" ||
+                (alternate.type === "application/json" && /^\s*[{[]/.test(content ?? "")));
             const body =
               mdn?.html ??
-              (content === undefined
-                ? undefined
-                : jsonRepresentation
-                  ? articleRepresentation(content, resolvedUrl)
-                  : content);
+              (site && alternate.url === site.url
+                ? siteCopy?.text
+                : content === undefined
+                  ? undefined
+                  : jsonRepresentation
+                    ? articleRepresentation(content, resolvedUrl)
+                    : content);
             if (body?.trim()) {
               const articleUrl = mdn?.resolvedUrl ?? resolvedUrl;
               // Decoded article fields are no longer the JSON response envelope.
-              const alternateContentType = mdn || jsonRepresentation ? undefined : reportedType;
+              const alternateContentType = siteCopy
+                ? siteCopy.contentType
+                : mdn || jsonRepresentation
+                  ? undefined
+                  : reportedType;
               const inspection = inspectPage(body, articleUrl, alternateContentType);
               const representationLanguage =
                 inspection.metadata.language ?? mdn?.metadata.language ?? alternate.language;
@@ -877,6 +855,7 @@ async function fetchPage(options: WebFetchOptions): Promise<WebFetchResult> {
                 inspection.completeness = mdn.completeness;
                 inspection.notes = mdn.notes;
               }
+              if (siteCopy?.complete) inspection.completeness = "complete";
               inspection.metadata = {
                 ...discovery.inspection.metadata,
                 ...Object.fromEntries(
@@ -947,7 +926,7 @@ async function fetchPage(options: WebFetchOptions): Promise<WebFetchResult> {
   if (deadline.aborted)
     lastError =
       "The web fetch exceeded its overall 10-second deadline. Try again later or open the page in a browser.";
-  throw new WebFetchError(requestedUrl, lastError, attempts);
+  throw Object.assign(new WebFetchError(requestedUrl, lastError, attempts), { unconvertedCopy });
 }
 
 /**
@@ -967,7 +946,8 @@ export function formatWebFetchResult(result: WebFetchResult, footer = ""): strin
     );
   if (result.content.length <= available) return prefix + result.content + footer;
 
-  const note = `\n\n… [output truncated at ${maxChars} characters]`;
+  // A saved-page footer already says where the rest is.
+  const note = footer ? "\n\n…" : `\n\n… [output truncated at ${maxChars} characters]`;
   let end = Math.max(0, available - note.length);
   for (;;) {
     if (splitsSurrogate(result.content, end)) end -= 1;

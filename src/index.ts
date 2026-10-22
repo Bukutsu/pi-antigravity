@@ -24,8 +24,12 @@ import { generateAntigravityImage, parseImageCommandArgs } from "./image/index.j
 import { executeAntigravitySearch, parseSearchCommandArgs } from "./search/index.js";
 import {
   executeAntigravityWebFetch,
+  formatWebFetchHeader,
   formatWebFetchResult,
   parseFetchCommandArgs,
+  savePageFile,
+  savedPageNote,
+  withSavedCopy,
   validateFetchTarget,
 } from "./web-fetch/index.js";
 import {
@@ -433,8 +437,17 @@ export default function (pi: ExtensionAPI): void {
           url,
           raw: parsed.raw,
         });
-        emitCommandOutput(ctx, formatWebFetchResult(result));
-      } catch (error) {
+        const full = result.content;
+        const fits = formatWebFetchHeader(result).length + full.length <= (result.maxChars ?? 0);
+        const footer = fits
+          ? ""
+          : savedPageNote(
+              await savePageFile(formatWebFetchHeader(result) + full, parsed.raw ? "html" : "md"),
+              full.length,
+            ).replace("Read the rest with your file tools.", "Open it to read the rest.");
+        emitCommandOutput(ctx, formatWebFetchResult(result, footer));
+      } catch (caught) {
+        const error = await withSavedCopy(caught);
         const msg = error instanceof Error ? error.message : String(error);
         const guidance = msg.replace(
           "Do not retry this URL with read_url_content. If permitted, use an available download tool or terminal to download it directly, then read the local file with a PDF reader.",

@@ -1,6 +1,7 @@
 // Opt-in integration check: real tool handler, credentials, and Google requests.
 // Only the Pi host is minimal. No mocked fetches or saved page captures.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { classifyFetchSmoke, isUpstreamAvailabilityError } from "./smoke-fetch-policy.js";
 import { readJson, authPath } from "./fs-json.mjs";
 import { refreshAntigravityToken } from "../src/auth/index.js";
@@ -49,11 +50,11 @@ function pageText(result) {
   const separator = text.indexOf("\n\n---\n\n");
   assert.ok(separator >= 0, "Missing page-content boundary");
   const body = text.slice(separator + 7);
-  const trailer = body.lastIndexOf("\n\nSnapshot:");
+  const trailer = body.lastIndexOf("\n\n[Full page saved to: ");
   return trailer < 0 ? body : body.slice(0, trailer);
 }
 const counts = { pass: 0, warn: 0, fail: 0 };
-let continuationChecked = false;
+let savedChecked = false;
 let insufficientCoverage = false;
 let requests = 0;
 const originalFetch = globalThis.fetch;
@@ -83,23 +84,16 @@ try {
       if (details.assessment !== "readable") assert.ok(text.includes(`Content assessment: ${details.assessment}`), "Missing content assessment");
       let available = pageText(result);
       if (details.assessment === "readable") assert.ok(available.trim(), "Readable result has no page content");
-      if (details.nextOffset !== undefined) {
-        assert.ok(details.snapshot && Number.isSafeInteger(details.nextOffset) && details.nextOffset > 0, "Invalid continuation");
+      if (details.fullOutputPath !== undefined) {
+        // The full page is saved locally; reading it needs no network or credentials.
         const before = { requests, credentialReads };
-        let offset = details.nextOffset;
-        for (let range = 0; offset !== undefined && range < 32; range += 1) {
-          const next = await tool.execute(label + "-next", { snapshot: details.snapshot, offset }, AbortSignal.timeout(5_000), undefined, context);
-          assert.ok(textOf(next).length + JSON.stringify(next.details).length <= 1000, "Continuation text and details exceed the configured character cap");
-          assert.equal(requests, before.requests, "Snapshot continuation made a network request");
-          assert.equal(credentialReads, before.credentialReads, "Snapshot continuation consulted credentials");
-          assert.equal(next.details.snapshot, details.snapshot, "Snapshot identity changed");
-          assert.ok(next.details.nextOffset === undefined || next.details.nextOffset > offset, "Continuation did not advance");
-          assert.ok(textOf(next).includes(`Range: ${offset}–`), "Continuation starts at wrong offset");
-          available += pageText(next);
-          continuationChecked = true;
-          offset = next.details.nextOffset;
-          if (available.toLowerCase().includes(expected.toLowerCase())) break;
-        }
+        const saved = readFileSync(details.fullOutputPath, "utf8");
+        assert.ok(text.includes(`[Full page saved to: ${details.fullOutputPath} (`), "Missing saved-page footer");
+        assert.ok(saved.length > pageText(result).length, "Saved page is not larger than the shown range");
+        assert.equal(requests, before.requests, "Reading the saved page made a network request");
+        assert.equal(credentialReads, before.credentialReads, "Reading the saved page consulted credentials");
+        available = saved;
+        savedChecked = true;
       }
       const found = available.toLowerCase().includes(expected.toLowerCase());
       // Missing stable page markers fail. The resolver may not reveal the MDN canonical alias.
@@ -107,7 +101,7 @@ try {
       const status = verdict.status;
       insufficientCoverage ||= verdict.insufficientCoverage;
       counts[status] += 1;
-      console.log(`${status.toUpperCase()} ${label}: ${Math.round(performance.now() - started)} ms; source=${details.source}; partial=${details.partial}; assessment=${details.assessment}; expected text ${found ? "found" : "not found in checked ranges"}${canonicalObserved ? "" : "; expected MDN canonical URL not observed"}`);
+      console.log(`${status.toUpperCase()} ${label}: ${Math.round(performance.now() - started)} ms; source=${details.source}; partial=${details.partial}; assessment=${details.assessment}; expected text ${found ? "found" : "not found"}${canonicalObserved ? "" : "; expected MDN canonical URL not observed"}`);
     } catch (error) {
       const message = redactSecrets(error instanceof Error ? error.message : String(error)).replaceAll(credentials.access, "[redacted]");
       const upstream = !(error instanceof assert.AssertionError) &&
@@ -123,7 +117,7 @@ try {
   if (previousCap === undefined) delete process.env.ANTIGRAVITY_WEB_FETCH_MAX_CHARS;
   else process.env.ANTIGRAVITY_WEB_FETCH_MAX_CHARS = previousCap;
 }
-console.log(`Fetch smoke: ${counts.pass} passed, ${counts.warn} warnings, ${counts.fail} failed; offline continuation ${continuationChecked ? "checked" : "not checked"}.`);
+console.log(`Fetch smoke: ${counts.pass} passed, ${counts.warn} warnings, ${counts.fail} failed; saved page ${savedChecked ? "checked" : "not checked"}.`);
 console.log("Live results vary; this check does not certify full-page coverage.");
 // Distinguish a broken contract (1) from insufficient live coverage (2).
-process.exitCode = counts.fail ? 1 : (insufficientCoverage || !counts.pass || !continuationChecked) ? 2 : 0;
+process.exitCode = counts.fail ? 1 : (insufficientCoverage || !counts.pass || !savedChecked) ? 2 : 0;

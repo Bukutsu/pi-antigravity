@@ -248,7 +248,11 @@ export function inspectPage(content: string, url: string, contentType?: string):
   // A page that loads an application script and shows nothing else is a shell.
   const completeness = classifyCopyCompleteness(content);
   // A page that loads application JavaScript and shows only a placeholder is a shell.
-  const assessment: ContentAssessment = !rendered.trim()
+  // A cut-off copy holding only a heading has lost its body; report it as empty.
+  const bodyMissing =
+    !rendered.trim() ||
+    (completeness === "incomplete" && !rendered.replace(/^#{1,6} .*$/gm, "").trim());
+  const assessment: ContentAssessment = bodyMissing
     ? // A copy that ends before the content is cut off, not an application shell.
       appScript && completeness !== "incomplete"
       ? "suspected-shell"

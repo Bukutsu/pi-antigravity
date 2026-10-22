@@ -561,13 +561,21 @@ export function htmlToMarkdown(
   for (const node of Array.from(
     document.body.querySelectorAll("div, section, ul, ol, header, footer, aside, nav"),
   )) {
-    const tokens = `${node.getAttribute("id") ?? ""} ${node.getAttribute("class") ?? ""}`
+    // `article-footer` names chrome, but a utility class such as
+    // `lg:grid-cols-sidebar-content` describes layout. Never drop the content root.
+    const names = `${node.getAttribute("id") ?? ""} ${node.getAttribute("class") ?? ""}`
       .toLowerCase()
-      .split(/[\s_-]+/);
+      .split(/\s+/)
+      .filter((name) => !/[:[\]/]/.test(name));
     if (
-      tokens.some((token) =>
-        /^(?:footer|sidebar|toc|nav|menu|breadcrumb|masthead|social)$/.test(token),
-      )
+      names.some((name) =>
+        name
+          .split(/[_-]+/)
+          .some((piece) =>
+            /^(?:footer|sidebar|toc|nav|menu|breadcrumb|masthead|social)$/.test(piece),
+          ),
+      ) &&
+      !node.querySelector('main, [role="main"], article')
     )
       node.remove();
   }

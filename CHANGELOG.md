@@ -6,7 +6,7 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
-- **`read_url_content` tool:** Reads public pages through Google's Antigravity fetch service and converts HTML to Markdown. Inadequate cached copies retry live, with useful cached content retained on recovery failure. The tool inspects metadata and article-matched JSON-LD before cleanup, and can recover through one advertised same-origin Markdown or supported article-JSON representation. Results distinguish source completeness, suspected content problems, and output truncation, and report retrieval attempts and provenance. Long captures support bounded, session-local snapshot reads without refetching. `/antigravity.fetch [--raw] <url>` exposes interactive fetching; raw mode preserves the crawled source. Disable with `ANTIGRAVITY_NO_FETCH_TOOL=1`, `ANTIGRAVITY_NO_EXTRA_TOOLS=1`, or the `read-url-content` resource in `pi config`.
+- **`read_url_content` tool:** Reads public pages through Google's Antigravity fetch service and converts HTML to Markdown. Inadequate cached copies retry live, with useful cached content retained on recovery failure. The tool inspects metadata and article-matched JSON-LD before cleanup, and can recover through one advertised same-origin Markdown or supported article-JSON representation. Results distinguish source completeness, suspected content problems, and output truncation, and report retrieval attempts and provenance. Pages too long for one answer are saved whole to a private temp file named in the answer. `/antigravity.fetch [--raw] <url>` exposes interactive fetching; raw mode preserves the crawled source. Disable with `ANTIGRAVITY_NO_FETCH_TOOL=1`, `ANTIGRAVITY_NO_EXTRA_TOOLS=1`, or the `read-url-content` resource in `pi config`.
 
 ### Changed
 
@@ -15,10 +15,10 @@ All notable changes to this project are documented in this file.
 ### Fixed
 
 - **Reader recovery and reporting:** One shared ten-second deadline and a ten-request ceiling bound Google retrieval. Useful cache content survives failed live recovery. Source completeness, heuristic content assessment, publisher metadata, omitted sections, and output truncation are reported separately. Failed and degraded reads leave sanitized diagnostics.
-- **Page conversion:** HTML conversion has size, depth, and element limits. Independent blocks avoid repeated prefix scans. Content-root selection skips empty placeholders, status reference articles are not mistaken for access walls from their headings alone, and XML/SVG documents remain intact. Unicode repair preserves body structure and continuation offsets.
+- **Page conversion:** HTML conversion has size, depth, and element limits. Independent blocks avoid repeated prefix scans. Content-root selection skips empty placeholders, status reference articles are not mistaken for access walls from their headings alone, and XML/SVG documents remain intact. Unicode repair preserves body structure. Utility layout classes such as `lg:grid-cols-sidebar-content` no longer remove the article, and a cut-off copy holding only its title is reported as empty.
 - **URL and credential safety:** Reader and search share a conservative public-URL policy. Explicit unsafe redirects fail closed. Recognized credentials are redacted from rendered URLs, progress, metadata, and errors without corrupting ordinary diagnostics or JSON. Credential parse failures do not quote their input.
-- **Output and snapshots:** Provenance and continuation instructions count toward the complete output cap. Consumers own footer space. Offline range cursors advance across long fence delimiters, and failed formatting does not evict a valid capture.
-- **MDN article recovery:** Inadequate page copies can use same-origin, identity-matched article JSON. Supported prose and specification sections survive unknown section types, with omissions noted. Incomplete article data is never reconstructed.
+- **Output:** Provenance and the saved-page footer count toward the complete output cap. Consumers own footer space. A budget too small to answer fails before saving a file.
+- **MDN article recovery:** Inadequate page copies can use same-origin, identity-matched article JSON. Supported prose and specification sections survive unknown section types, with omissions noted. Incomplete article data is never reconstructed. Cut-off Wikipedia articles and raw GitHub files recover through identity-checked publisher copies.
 
 ## [0.11.0] - 2026-10-16
 

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { classifyFetchSmoke } from "./smoke-fetch-policy.js";
-import { createSnapshotStore } from "../src/web-fetch/snapshots.js";
 import { readFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { executeAntigravityWebFetch, statusAction } from "../src/web-fetch/web-fetch.js";
@@ -17,11 +16,7 @@ import {
 import { inspectPage } from "../src/web-fetch/inspect.js";
 import { htmlToMarkdown, looksLikeHtml } from "../src/web-fetch/markdown.js";
 import { inspectMdnRepresentation } from "../src/web-fetch/mdn.js";
-import {
-  readCapturedPage,
-  formatWebFetchHeader,
-  type WebFetchResult,
-} from "../src/web-fetch/web-fetch.js";
+import { formatWebFetchHeader, type WebFetchResult } from "../src/web-fetch/web-fetch.js";
 import { formatSearchResult } from "../src/search/search.js";
 
 assert.equal(repairText("x\ud800\ny\udc00"), "x\ufffd\ny\ufffd");
@@ -259,6 +254,41 @@ assert.ok(
     ),
   ).includes("Report a problem"),
 );
+// Utility layout classes are not chrome, and a wrapper holding the content root stays.
+for (const className of ["lg:grid-cols-sidebar-content", "page-sidebar"]) {
+  const rendered = htmlToMarkdown(
+    page(
+      '<div class="' +
+        className +
+        '"><main><h1>Quick Start</h1><p>Layout-wrapped article body.</p></main></div>',
+    ),
+  );
+  assert.ok(rendered.includes("Layout-wrapped article body."), className);
+}
+assert.ok(
+  !htmlToMarkdown(
+    page('<main><p>Useful.</p><div class="site-sidebar">Related links</div></main>'),
+  ).includes("Related links"),
+);
+// A cut-off copy that holds only the title has lost its body.
+const cutOff = inspectPage(
+  "<!doctype html><html><head><title>T</title></head><body><main><h1>Unix philosophy</h1>",
+  "https://example.com/",
+);
+assert.equal(cutOff.completeness, "incomplete");
+assert.equal(cutOff.assessment, "empty");
+// Large reference pages convert: RFC-sized markup fits the work limits.
+const reference = page(
+  "<main>" +
+    (
+      "<section><h2>Section</h2><p>" +
+      "Reference text. ".repeat(12) +
+      "<a href=/x>a link</a> and <code>code</code>.</p></section>"
+    ).repeat(3_000) +
+    "</main>",
+);
+assert.ok(reference.length > 512_000);
+assert.ok(htmlToMarkdown(reference).includes("## Section"));
 const manyBlocks = Array.from(
   { length: 2000 },
   (_, i) => "<h2>Section " + i + "</h2><p>Body " + i + ' with <a href="/link">a link</a>.</p>',
@@ -291,34 +321,11 @@ const captured: WebFetchResult = {
   requestedUrl: "https://example.com/",
   resolvedUrl: "https://example.com/",
   content: "",
-  fullContent: "A".repeat(700) + "\n" + "`".repeat(1200) + "\ncode\n" + "`".repeat(1200),
   bytes: 0,
   partial: null,
   source: "cache",
   truncated: false,
 };
-const store = createSnapshotStore();
-const originalNow = Date.now;
-let now = originalNow();
-Date.now = () => now;
-try {
-  const id = store.put(captured)!;
-  assert.equal(store.get(id), captured);
-  now += 10 * 60_000 + 1;
-  assert.throws(() => store.get(id), /expired/);
-} finally {
-  Date.now = originalNow;
-}
-let offset = 0;
-for (let ranges = 0; ; ranges += 1) {
-  assert.ok(ranges < 20, "fence delimiter must not livelock");
-  const range = readCapturedPage(captured, offset, 1000);
-  assert.equal(range.offset, offset);
-  if (range.nextOffset === undefined) break;
-  assert.ok(range.nextOffset > offset);
-  offset = range.nextOffset;
-}
-assert.throws(() => readCapturedPage(captured, 0.5), /whole number/);
 const redirected = {
   ...captured,
   requestedUrl: "https://example.com/" + "a".repeat(500) + "b",
@@ -415,5 +422,5 @@ try {
   else process.env.ANTIGRAVITY_BASE_URL = originalEndpoint;
 }
 console.log(
-  "reader foundations: text, credentials, URL policy, inspection, work bounds, MDN, and advancing ranges passed",
+  "reader foundations: text, credentials, URL policy, inspection, work bounds, and MDN passed",
 );

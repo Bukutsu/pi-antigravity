@@ -13,6 +13,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import registerFetch from "../src/features/read-url-content.js";
 import { isPrivateAddress } from "../src/search/index.js";
 import { isRecord } from "../src/utils/util.js";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const ENV_NAMES = [
   "ANTIGRAVITY_WEB_FETCH_MAX_CHARS",
@@ -57,6 +60,10 @@ function cutArticle(body: string, extra = "", lang = "en"): string {
 const saved = new Map(ENV_NAMES.map((name) => [name, process.env[name]]));
 for (const name of ENV_NAMES) delete process.env[name];
 process.env.ANTIGRAVITY_BASE_URL = "https://mock.googleapis.com";
+// Saved pages land in a directory this suite removes; os.tmpdir() reads TMPDIR per call.
+const previousTmp = process.env.TMPDIR;
+const scratch = mkdtempSync(join(tmpdir(), "pi-url-test-"));
+process.env.TMPDIR = scratch;
 
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
@@ -74,29 +81,21 @@ type ToolResult = {
 };
 
 let tool: Parameters<ExtensionAPI["registerTool"]>[0] | undefined;
-const sessionHooks = new Map<string, () => void>();
 let credentialReads = 0;
 registerFetch({
   registerTool(definition) {
     // Only execute is exercised; renderer generic types are irrelevant to this host.
     tool = definition as typeof tool;
   },
-  on(event, callback) {
-    sessionHooks.set(event, () => {
-      Reflect.apply(callback, undefined, []);
-    });
-    return () => {};
-  },
 });
 strictAssert.ok(tool, "the read_url_content tool must register");
 strictAssert.equal(tool.name, "read_url_content");
 const schema: unknown = tool.parameters;
 strictAssert.ok(isRecord(schema) && isRecord(schema.properties));
-strictAssert.deepEqual(Object.keys(schema.properties).sort(), ["offset", "snapshot", "url"]);
-strictAssert.ok(isRecord(schema.properties.offset));
-strictAssert.equal(schema.properties.offset.type, "integer");
+strictAssert.deepEqual(Object.keys(schema.properties), ["url"]);
+strictAssert.deepEqual(schema.required, ["url"]);
 strictAssert.match(tool.description, /no JavaScript execution/);
-strictAssert.ok(tool.promptGuidelines?.some((line) => line.includes("ten minutes")));
+strictAssert.ok(tool.promptGuidelines?.some((line) => line.includes("local file")));
 
 const apiKey = JSON.stringify({ token: "ya29.fixture-token", projectId: "fixture-project" });
 const context = {
@@ -113,19 +112,13 @@ type RunOptions = {
   updates?: string[];
   /** Character budget for this call. */
   maxChars?: number;
-  /** Read a captured page instead of a URL. */
-  snapshot?: string;
-  offset?: number;
 };
 
 async function read(url: string, options: RunOptions = {}): Promise<ToolResult> {
   const updates = options.updates ?? [];
-  // The budget stays as the scenario set it, so a continuation matches its first range.
   if (options.maxChars !== undefined)
     process.env.ANTIGRAVITY_WEB_FETCH_MAX_CHARS = String(options.maxChars);
-  const params = options.snapshot
-    ? { snapshot: options.snapshot, offset: options.offset }
-    : { url };
+  const params = { url };
   const result = await tool!.execute(
     "call",
     params,
@@ -143,12 +136,12 @@ function textOf(result: ToolResult): string {
     .join("\n");
 }
 
-/** The page body, without the provenance header and the continuation footer. */
+/** The page body, without the provenance header and the saved-page footer. */
 function bodyOf(result: ToolResult): string {
   const text = textOf(result);
   const separator = text.indexOf("\n\n---\n\n");
   const body = separator < 0 ? text : text.slice(separator + 7);
-  const trailer = body.lastIndexOf("\n\nSnapshot:");
+  const trailer = body.lastIndexOf("\n\n[Full page saved to: ");
   return trailer < 0 ? body : body.slice(0, trailer);
 }
 
@@ -185,7 +178,7 @@ async function scenarioGuards(): Promise<void> {
   strictAssert.equal(isPrivateAddress("2606:4700::1111%eth0"), false);
 }
 
-/** A readable page arrives as markdown, with provenance, and continues offline. */
+/** A readable page arrives as markdown, with provenance; a long one is saved whole. */
 async function scenarioReadablePage(): Promise<void> {
   const body = "The quick brown fox jumps over the lazy dog. ".repeat(200).trim();
   calls.length = 0;
@@ -210,41 +203,32 @@ async function scenarioReadablePage(): Promise<void> {
   );
   strictAssert.equal(first.details.source, "cache");
   strictAssert.equal(first.details.truncated, true);
-  strictAssert.ok(first.details.snapshot, "a long page is captured for continuation");
   strictAssert.deepEqual(Object.keys(first.details).sort(), [
     "assessment",
     "attempts",
     "bytes",
-    "nextOffset",
+    "fullOutputPath",
     "omittedAttempts",
     "partial",
     "representationUrl",
-    "snapshot",
     "source",
     "truncated",
   ]);
 
-  // The captured page continues without another request or another credential read.
-  const requestCount = calls.length;
-  const credentialsBeforeContinuation = credentialReads;
-  let combined = bodyOf(first);
-  let offset = first.details.nextOffset as number | undefined;
-  while (offset !== undefined) {
-    const next = await read("", { snapshot: first.details.snapshot as string, offset });
-    strictAssert.ok(
-      textOf(next).length + JSON.stringify(next.details).length <= 1_000,
-      "each range shares the text and details budget",
-    );
-    combined += bodyOf(next);
-    offset = next.details.nextOffset as number | undefined;
-  }
-  strictAssert.equal(combined, `# Test page\n\n${body}`, "the ranges must reassemble the page");
-  strictAssert.equal(calls.length, requestCount, "a continuation must not refetch");
-  strictAssert.equal(
-    credentialReads,
-    credentialsBeforeContinuation,
-    "a continuation must not consult credentials",
-  );
+  // The whole page is on disk, private to the user, and the answer says where.
+  const path = first.details.fullOutputPath as string;
+  strictAssert.ok(path.startsWith(scratch), "the page is saved under the temp directory");
+  strictAssert.ok(text.includes(`[Full page saved to: ${path} (`), "the answer names the file");
+  const saved = readFileSync(path, "utf8");
+  strictAssert.ok(saved.startsWith("Page metadata"), "the file keeps the provenance header");
+  strictAssert.ok(saved.endsWith(`# Test page\n\n${body}`), "the file holds the whole page");
+  strictAssert.equal(statSync(path).mode & 0o777, 0o600);
+  strictAssert.ok(updates.some((update) => update.includes("Reading https://example.com/page")));
+
+  // A page that fits is answered whole, without a file.
+  const short = await read("https://example.com/short", { maxChars: 60_000 });
+  strictAssert.equal(short.details.fullOutputPath, undefined);
+  strictAssert.ok(!textOf(short).includes("Full page saved"));
 }
 
 /** A redirect is followed when it is usable, and refused when it is not. */
@@ -585,25 +569,6 @@ async function scenarioTruncatedCopy(): Promise<void> {
   );
 }
 
-/** Only four captures are kept, so the oldest one is dropped. */
-async function scenarioCaptureCap(): Promise<void> {
-  calls.length = 0;
-  handler = (_body, url) =>
-    url.endsWith(":rewriteUri") ? json({}) : json({ content: article("Body.") });
-  const ids: string[] = [];
-  for (let index = 0; index < 5; index += 1) {
-    const result = await read(`https://example.com/page-${index}`);
-    ids.push(result.details.snapshot as string);
-  }
-  await strictAssert.rejects(
-    read("", { snapshot: ids[0] }),
-    /Unknown or expired/,
-    "the fifth capture evicts the first",
-  );
-  const kept = await read("", { snapshot: ids[4] });
-  strictAssert.ok(textOf(kept).includes("Body."));
-}
-
 /** An oversized response is refused once, not retried across every endpoint. */
 async function scenarioOversized(): Promise<void> {
   calls.length = 0;
@@ -621,37 +586,111 @@ async function scenarioOversized(): Promise<void> {
   strictAssert.ok(calls.length <= 2, `expected at most two requests, saw ${calls.length}`);
 }
 
-async function scenarioFailedCapture(): Promise<void> {
+/** Pages beyond the conversion limits are saved unconverted, not just refused. */
+async function scenarioUnconverted(): Promise<void> {
+  const html = "<html><body><main>" + "<br>".repeat(60_000) + "</main></body></html>";
+  calls.length = 0;
+  handler = (_body, url) => (url.endsWith(":rewriteUri") ? json({}) : json({ content: html }));
+  const error = await read("https://example.com/huge").then(
+    () => strictAssert.fail("an unconvertible page must not be returned as converted"),
+    (caught: unknown) => caught as Error,
+  );
+  strictAssert.match(error.message, /too many elements to convert safely/);
+  const path = /saved to: (\S+page\.html)\./.exec(error.message)?.[1];
+  strictAssert.ok(path && path.startsWith(scratch), "the error names the saved copy");
+  strictAssert.equal(readFileSync(path, "utf8"), html);
+}
+
+/** A budget too small to answer fails before leaving a file behind. */
+async function scenarioBudgetFailure(): Promise<void> {
   handler = (_body, url) =>
-    url.endsWith(":rewriteUri") ? json({}) : json({ content: article("Keep this capture.") });
-  const captures: string[] = [];
-  for (let index = 0; index < 4; index += 1)
-    captures.push(
-      (await read("https://example.com/kept-" + index, { maxChars: 1000 })).details
-        .snapshot as string,
-    );
+    url.endsWith(":rewriteUri") ? json({}) : json({ content: article("Body. ".repeat(500)) });
+  const before = readdirCount();
   await strictAssert.rejects(
     read("https://example.com/budget-failure", { maxChars: 1 }),
     /budget is too small/,
   );
-  const kept = await read("", { snapshot: captures[0], maxChars: 1000 });
-  strictAssert.ok(bodyOf(kept).includes("Keep this capture."));
+  strictAssert.equal(readdirCount(), before);
+}
+
+function readdirCount(): number {
+  return readdirSync(scratch).length;
+}
+
+/** Wikipedia's cut-off article page recovers through its identity-checked parse API. */
+async function scenarioWikipedia(): Promise<void> {
+  const page = "https://en.wikipedia.org/wiki/Unix_philosophy";
+  const parse = (title: string, redirects: unknown[] = []) =>
+    JSON.stringify({
+      parse: {
+        title,
+        redirects,
+        text: '<div class="mw-parser-output"><p>The Unix philosophy emphasizes small composable tools.</p></div>',
+      },
+    });
+  for (const [answer, recovered] of [
+    [parse("Unix philosophy"), true],
+    [parse("Unix design", [{ from: "Unix philosophy", to: "Unix design" }]), true],
+    [parse("Other article"), false],
+    [parse("Unix philosophy").slice(0, -20), false],
+  ] as const) {
+    calls.length = 0;
+    handler = (body, url) => {
+      if (url.endsWith(":rewriteUri")) return json({});
+      if (String(body.url).startsWith("https://en.wikipedia.org/w/api.php?"))
+        return json({ content: answer });
+      return json({ content: cutArticle("") });
+    };
+    const result = await read(page, { maxChars: 4_000 });
+    strictAssert.equal(
+      bodyOf(result).includes("small composable tools"),
+      recovered,
+      recovered ? "the verified article is used" : "another or a cut-off article is never used",
+    );
+    if (recovered) strictAssert.equal(result.details.partial, false);
+    const api = calls.find((call) => String(call.body.url).includes("/w/api.php?"));
+    strictAssert.ok(
+      api && new URL(String(api.body.url)).searchParams.get("page") === "Unix_philosophy",
+    );
+  }
+}
+
+/** A cut raw GitHub file recovers through the file page's own full line list. */
+async function scenarioGithubRaw(): Promise<void> {
+  const raw = "https://raw.githubusercontent.com/owner/repo/main/src/index.ts";
+  const blob = "https://github.com/owner/repo/blob/main/src/index.ts";
+  const lines = ["export const a = 1;", "export const b = 2;", "// the end of the file"];
+  const page = (path: string, truncated = false) =>
+    `<html><body><script type="application/json" data-target="react-app.embeddedData">${JSON.stringify(
+      {
+        payload: {
+          codeViewBlobLayoutRoute: { path, blob: { truncated } },
+          "codeViewBlobLayoutRoute.StyledBlob": { rawLines: lines },
+        },
+      },
+    )}</script></body></html>`;
+  for (const [file, recovered] of [
+    [page("src/index.ts"), true],
+    [page("src/other.ts"), false],
+    [page("src/index.ts", true), false],
+  ] as const) {
+    calls.length = 0;
+    handler = (body, url) => {
+      if (url.endsWith(":rewriteUri")) return json({});
+      if (body.url === blob) return json({ content: file });
+      return json({ content: "export const a = 1;\nexport con" });
+    };
+    const result = await read(raw, { maxChars: 4_000 });
+    strictAssert.equal(bodyOf(result).includes("// the end of the file"), recovered);
+    strictAssert.ok(
+      !calls.some((call) => call.url.endsWith(":rewriteUri") && call.body.originalUri === blob),
+      "Google rewrites file pages back to raw, so the file page is not resolved",
+    );
+    if (recovered) strictAssert.equal(bodyOf(result), lines.join("\n"));
+  }
 }
 
 async function scenarioLifecycle(): Promise<void> {
-  for (const hook of sessionHooks.values()) {
-    handler = (_body, url) =>
-      url.endsWith(":rewriteUri") ? json({}) : json({ content: article("Captured page.") });
-    const result = await read("https://example.com/lifecycle", { maxChars: 1000 });
-    hook();
-    const before = { calls: calls.length, credentials: credentialReads };
-    await strictAssert.rejects(
-      read("", { snapshot: result.details.snapshot as string }),
-      /Unknown or expired/,
-    );
-    strictAssert.equal(calls.length, before.calls);
-    strictAssert.equal(credentialReads, before.credentials);
-  }
   const controller = new AbortController();
   controller.abort();
   const before = { calls: calls.length, credentials: credentialReads };
@@ -713,13 +752,20 @@ try {
   await scenarioLongFence();
   await scenarioDetection();
   await scenarioTruncatedCopy();
-  await scenarioCaptureCap();
   await scenarioOversized();
-  await scenarioFailedCapture();
+  await scenarioUnconverted();
+  await scenarioBudgetFailure();
+  await scenarioWikipedia();
+  await scenarioGithubRaw();
   await scenarioLifecycle();
-  console.log("read_url_content: end-to-end fetch, recovery, redaction and capture checks passed");
+  console.log(
+    "read_url_content: end-to-end fetch, recovery, redaction and saved-page checks passed",
+  );
 } finally {
   globalThis.fetch = originalFetch;
+  rmSync(scratch, { recursive: true, force: true });
+  if (previousTmp === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = previousTmp;
   for (const [name, value] of saved) {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
