@@ -17,5 +17,5 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "scripts/test-web-fetch.ts", "scripts/test-reader-foundations.ts"]
 }

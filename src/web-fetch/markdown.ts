@@ -2,9 +2,13 @@
  * HTML parsing and Markdown rendering belong to Domino and Turndown. This module
  * only chooses page content, resolves links, and reads the crawler's metadata.
  */
-import { createDocument } from "@mixmark-io/domino";
+import { parseDocument } from "./document.js";
+import { mediaKind } from "./media.js";
+import { advanceFence, FENCE_LINE, type Fence } from "./fences.js";
 import TurndownService from "turndown";
 import { tables } from "turndown-plugin-gfm";
+import { cleanText } from "../utils/text.js";
+import { METADATA_LIMITS } from "./metadata.js";
 
 const markdown = new TurndownService({
   headingStyle: "atx",
@@ -43,7 +47,7 @@ markdown.addRule("tableCell", {
 const DROPPED_ELEMENTS =
   "script, style, noscript, template, svg, canvas, iframe, form, select, option, button";
 const CHROME =
-  'nav, aside, footer, .social-icons, [role="navigation"], [role="banner"], [role="contentinfo"], [role="search"], [aria-hidden="true"], [hidden]';
+  'nav, aside, footer, .social-icons, .site-footer, .page-footer, .site-header, .site-nav, [role="navigation"], [role="banner"], [role="contentinfo"], [role="search"], [aria-hidden="true"], [hidden]';
 
 export type PageMetadata = {
   title?: string;
@@ -53,23 +57,10 @@ export type PageMetadata = {
 };
 
 /** Collapse line breaks/control characters and bound page-controlled metadata. */
-export function sanitizeMetadataText(value: string | undefined, limit: number): string | undefined {
-  if (!value) return undefined;
-  const cleaned = value
-    .replace(/[\p{Cc}]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!cleaned) return undefined;
-  if (cleaned.length <= limit) return cleaned;
-  let end = Math.max(0, limit - 1);
-  if (/[\uD800-\uDBFF]/.test(cleaned[end - 1] ?? "") && /[\uDC00-\uDFFF]/.test(cleaned[end] ?? ""))
-    end -= 1;
-  return `${cleaned.slice(0, end)}…`;
-}
+export const sanitizeMetadataText = cleanText;
 
 /** Read metadata through the HTML parser, not a search through attribute text. */
-export function extractPageMetadata(html: string): PageMetadata {
-  const document = createDocument(html);
+export function extractPageMetadata(html: string, document = parseDocument(html)): PageMetadata {
   const meta = (selector: string) =>
     document.querySelector(selector)?.getAttribute("content")?.trim() || undefined;
   return {
@@ -77,20 +68,20 @@ export function extractPageMetadata(html: string): PageMetadata {
       meta('meta[property="og:title"]') ??
         meta('meta[name="twitter:title"]') ??
         (document.querySelector("title")?.textContent?.trim() || undefined),
-      300,
+      METADATA_LIMITS.title,
     ),
     description: sanitizeMetadataText(
       meta('meta[property="og:description"]') ??
         meta('meta[name="description"]') ??
         meta('meta[name="twitter:description"]'),
-      1000,
+      METADATA_LIMITS.description,
     ),
     updated: sanitizeMetadataText(
       meta('meta[property="article:modified_time"]') ??
         meta('meta[property="og:updated_time"]') ??
         meta('meta[name="last-modified"]') ??
         meta('meta[name="lastmod"]'),
-      100,
+      METADATA_LIMITS.updated,
     ),
   };
 }
@@ -116,6 +107,12 @@ const HTML_VOID_TAGS = new Set([
   "wbr",
 ]);
 
+const HTML_ELEMENTS = new Set(
+  "html head body title meta link script style noscript template main article section header footer nav aside div p span a strong em b i u s del strike code pre blockquote h1 h2 h3 h4 h5 h6 ul ol li dl dt dd table caption thead tbody tfoot tr th td figure figcaption picture img source br hr form label input button select option textarea details summary time address small sub sup abbr cite q mark kbd samp var wbr".split(
+    " ",
+  ),
+);
+
 /**
  * Whether an element's closing tag ends a markup run. Text after the closing tag
  * belongs to the sentence around it ("closed by </p>."), not to the markup.
@@ -127,6 +124,12 @@ function closesLikeMarkup(source: string, name: string): boolean {
     const nextMarkup = rest.indexOf("<");
     const tail = nextMarkup < 0 ? rest : rest.slice(0, nextMarkup);
     if (!tail.trim()) return true;
+    // Prose can name an opening tag and explain how it is closed. Trailing text
+    // alone does not disqualify an otherwise ordinary HTML fragment.
+    const explanation = /\b(?:closed|closing|ended)\s+(?:by|with)\s*$/i.test(
+      source.slice(0, match.index),
+    );
+    if (!(explanation && /^[.!?\s]*$/.test(tail))) return true;
   }
   return false;
 }
@@ -134,7 +137,10 @@ function closesLikeMarkup(source: string, name: string): boolean {
 /** Require document markers or element structure, not a prose mention of a tag. */
 function hasHtmlStructure(source: string): boolean {
   if (!source.trimStart().startsWith("<")) return false;
+
   if (/<!doctype\b[^<>]*>|<\/?(?:html|head|body)\b/i.test(source)) return true;
+  const first = /^\s*<([a-z][\w:-]*)\b/i.exec(source)?.[1]?.toLowerCase();
+  if (first && !HTML_ELEMENTS.has(first)) return false;
   const names = new Set<string>();
   for (const match of source.matchAll(HTML_TAG)) {
     const name = match[1]?.toLowerCase();
@@ -150,14 +156,16 @@ function hasHtmlStructure(source: string): boolean {
 
 /** Leave plain text, JSON, and already-Markdown responses alone. */
 export function looksLikeHtml(text: string, contentType?: string): boolean {
-  const mediaType = contentType?.split(";")[0].trim().toLowerCase();
+  const kind = mediaKind(contentType);
   if (
-    mediaType === "text/plain" ||
-    mediaType === "application/json" ||
-    mediaType === "text/markdown"
+    kind === "xml" ||
+    /^\s*(?:<\?xml\b|<svg\b|<urlset\b|<sitemapindex\b|<feed\b|<rss\b)/i.test(text)
   )
     return false;
-  if (mediaType === "text/html" || mediaType === "application/xhtml+xml") return true;
+  if (kind === "html") return true;
+  // An explicit document wrapper outweighs an incorrect text/plain service label.
+  if (/^\s*(?:<!doctype\s+html\b|<html\b)/i.test(text)) return true;
+  if (kind === "text" || kind === "json" || kind === "pdf") return false;
   if (/^\s*[{"[]/.test(text)) {
     try {
       JSON.parse(text);
@@ -166,26 +174,17 @@ export function looksLikeHtml(text: string, contentType?: string): boolean {
       // A leading bracket alone does not establish JSON.
     }
   }
-  let fence: { marker: string; length: number } | undefined;
+  let fence: Fence | undefined;
   const prose: string[] = [];
   for (const line of text.slice(0, 4000).split("\n")) {
-    const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-    if (fence) {
-      if (
-        delimiter &&
-        delimiter[1][0] === fence.marker &&
-        delimiter[1].length >= fence.length &&
-        !delimiter[2].trim()
-      )
-        fence = undefined;
-    } else if (delimiter && !(delimiter[1][0] === "`" && delimiter[2].includes("`"))) {
-      fence = { marker: delimiter[1][0], length: delimiter[1].length };
-    } else prose.push(line);
+    const previous = fence;
+    fence = advanceFence(fence, line);
+    if (!previous && !fence && !FENCE_LINE.test(line)) prose.push(line);
   }
   const source = prose.join("\n").replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, "");
   // Markdown can include HTML decorations without becoming an HTML document.
   if (/^ {0,3}#{1,6}\s/m.test(source) && !/<!doctype\b|<(?:html|head|body)\b/i.test(source)) {
-    const body = createDocument(source).body;
+    const body = parseDocument(source).body;
     if (
       Array.from(body.childNodes).some(
         (node) => node.nodeType === 3 && /^ {0,3}#{1,6}\s/m.test(node.textContent ?? ""),
@@ -310,6 +309,8 @@ export function isPartialCopy(html: string): boolean {
 export type HtmlToMarkdownOptions = {
   /** Page URL, used to turn relative links and image sources into absolute ones. */
   baseUrl?: string;
+  /** An owned DOM supplied by inspection, before destructive cleanup. */
+  document?: Document;
 };
 
 function resolveTarget(target: string, baseUrl?: string): string {
@@ -539,11 +540,13 @@ function hackerNewsListing(document: Document, baseUrl?: string): HTMLElement | 
 }
 
 /** Convert the page's content; the DOM parser also repairs incomplete crawler copies. */
-export function htmlToMarkdown(html: string, { baseUrl }: HtmlToMarkdownOptions = {}): string {
+export function htmlToMarkdown(
+  html: string,
+  { baseUrl, document = parseDocument(html) }: HtmlToMarkdownOptions = {},
+): string {
   if (!html) return "";
   // Mozilla Readability recommends isolating its mutating extraction on a clone (Apache-2.0):
   // https://github.com/mozilla/readability. This parse already owns a disposable DOM.
-  const document = createDocument(html);
   for (const node of Array.from(document.querySelectorAll(DROPPED_ELEMENTS))) node.remove();
   for (const node of Array.from(document.querySelectorAll("[hidden], [aria-hidden], [style]"))) {
     if (
@@ -554,14 +557,30 @@ export function htmlToMarkdown(html: string, { baseUrl }: HtmlToMarkdownOptions 
       node.remove();
     }
   }
-  const articles = Array.from(document.querySelectorAll("article"));
+  for (const node of Array.from(document.body.querySelectorAll(CHROME))) node.remove();
+  for (const node of Array.from(
+    document.body.querySelectorAll("div, section, ul, ol, header, footer, aside, nav"),
+  )) {
+    const tokens = `${node.getAttribute("id") ?? ""} ${node.getAttribute("class") ?? ""}`
+      .toLowerCase()
+      .split(/[\s_-]+/);
+    if (
+      tokens.some((token) =>
+        /^(?:footer|sidebar|toc|nav|menu|breadcrumb|masthead|social)$/.test(token),
+      )
+    )
+      node.remove();
+  }
+  // Empty/hidden placeholders are not content roots. Prefer the substantive region,
+  // not whichever <main> happens to occur first.
+  const regions = Array.from(
+    document.querySelectorAll<HTMLElement>('main, [role="main"], article'),
+  );
+  regions.sort((a, b) => (b.textContent?.trim().length ?? 0) - (a.textContent?.trim().length ?? 0));
   const root =
     hackerNewsListing(document, baseUrl) ??
-    document.querySelector("main") ??
-    document.querySelector('[role="main"]') ??
-    (articles.length === 1 ? articles[0] : null) ??
+    regions.find((node) => node.textContent?.trim()) ??
     document.body;
-  for (const node of Array.from(root.querySelectorAll(CHROME))) node.remove();
   if (isPartialCopy(html)) removeDanglingTailText(root);
 
   for (const link of Array.from(root.querySelectorAll("a"))) {
@@ -658,5 +677,36 @@ export function htmlToMarkdown(html: string, { baseUrl }: HtmlToMarkdownOptions 
     table.appendChild(body);
   }
 
-  return markdown.turndown(root).trim();
+  return convertBlocks(root);
+}
+
+/**
+ * Turndown joins a growing string at every sibling, repeatedly scanning the entire
+ * prefix for trailing newlines. Convert independent blocks separately; keep inline,
+ * list and table contexts together so their Markdown semantics remain intact.
+ */
+function convertBlocks(root: HTMLElement): string {
+  const containers = /^(BODY|DIV|MAIN|ARTICLE|SECTION|HEADER|FOOTER|ASIDE|NAV)$/;
+  const block =
+    /^(P|H[1-6]|UL|OL|PRE|TABLE|BLOCKQUOTE|DIV|SECTION|MAIN|ARTICLE|HR|DL|FIGURE|HEADER|FOOTER|ASIDE|NAV)$/;
+  const children = Array.from(root.childNodes);
+  if (
+    containers.test(root.nodeName) &&
+    children.every(
+      (node) =>
+        node.nodeType === 8 ||
+        (node.nodeType === 3 && !node.textContent?.trim()) ||
+        (node.nodeType === 1 && block.test(node.nodeName)),
+    )
+  ) {
+    return children
+      .filter((node): node is HTMLElement => node.nodeType === 1)
+      .map(convertBlocks)
+      .filter(Boolean)
+      .join("\n\n");
+  }
+  // turndown(element) converts its children, not the element itself.
+  const wrapper = root.ownerDocument.createElement("div");
+  wrapper.appendChild(root.cloneNode(true));
+  return markdown.turndown(wrapper).trim();
 }

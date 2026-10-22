@@ -26,6 +26,7 @@ import {
   executeAntigravityWebFetch,
   formatWebFetchResult,
   parseFetchCommandArgs,
+  validateFetchTarget,
 } from "./web-fetch/index.js";
 import {
   applyAntigravityCatalog,
@@ -318,6 +319,7 @@ export default function (pi: ExtensionAPI): void {
         `activeAccount=${activeLabel || "none"}`,
         ...(d.latencyMs !== undefined ? [`lastLatencyMs=${d.latencyMs}`] : []),
         `toolSchemaWarnings=${d.toolSchemaWarnings || "none"}`,
+        ...(d.fetchTrace ? [`lastFetch=${d.fetchTrace}`] : []),
         `lastError=${d.error ? redactSecrets(d.error) : "none"}`,
         "transport=native-streamSimple",
         "runtimeCli=not-used",
@@ -415,6 +417,7 @@ export default function (pi: ExtensionAPI): void {
         return;
       }
       try {
+        const url = validateFetchTarget(parsed.url);
         const apiKey = await resolveApiKeyFromContext(ctx);
         if (!apiKey) {
           emitCommandOutput(
@@ -427,13 +430,17 @@ export default function (pi: ExtensionAPI): void {
         if (ctx.hasUI) ctx.ui.notify("Reading page via Antigravity…", "info");
         const result = await executeAntigravityWebFetch({
           apiKey,
-          url: parsed.url,
+          url,
           raw: parsed.raw,
         });
         emitCommandOutput(ctx, formatWebFetchResult(result));
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        emitCommandOutput(ctx, `Antigravity fetch failed: ${redactSecrets(msg)}`, "warning");
+        const guidance = msg.replace(
+          "Do not retry this URL with read_url_content. If permitted, use an available download tool or terminal to download it directly, then read the local file with a PDF reader.",
+          "If you have permission, download the URL directly and open the local file with a PDF reader.",
+        );
+        emitCommandOutput(ctx, redactSecrets(guidance), "warning");
       }
     },
   });

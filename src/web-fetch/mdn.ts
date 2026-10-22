@@ -1,4 +1,6 @@
-import { createDocument } from "@mixmark-io/domino";
+import { parseDocument } from "./document.js";
+import { cleanText } from "../utils/text.js";
+import { METADATA_LIMITS } from "./metadata.js";
 import { isRecord } from "../utils/util.js";
 import type { PageInspection } from "./inspect.js";
 
@@ -31,6 +33,7 @@ export function inspectMdnRepresentation(
       resolvedUrl: string;
       completeness: PageInspection["completeness"];
       metadata: PageInspection["metadata"];
+      notes: string[];
     }
   | undefined {
   if (!mdnRepresentationUrl(articleUrl) || content.length > 2_000_000) return undefined;
@@ -81,15 +84,23 @@ export function inspectMdnRepresentation(
     identity.hash
   )
     return undefined;
-  const document = createDocument("<html><body><main></main></body></html>");
+  const document = parseDocument("<html><body><main></main></body></html>");
+  const notes: string[] = [];
+  const omitted = new Set<string>();
   const main = document.querySelector("main")!;
   const title = document.createElement("h1");
   title.textContent = pageTitle;
   main.appendChild(title);
   for (const section of doc.body) {
-    if (!isRecord(section) || !isRecord(section.value)) return undefined;
+    if (!isRecord(section) || !isRecord(section.value)) {
+      omitted.add("unrecognized");
+      continue;
+    }
     const data = section.value;
-    if (section.type !== "prose" && section.type !== "specifications") return undefined;
+    if (section.type !== "prose" && section.type !== "specifications") {
+      omitted.add(cleanText(typeof section.type === "string" ? section.type : "unrecognized", 60)!);
+      continue;
+    }
     if (typeof data.title === "string" && data.title) {
       const heading = document.createElement(data.isH3 === true ? "h3" : "h2");
       heading.textContent = data.title;
@@ -98,7 +109,9 @@ export function inspectMdnRepresentation(
     if (section.type === "prose") {
       if (typeof data.content !== "string") return undefined;
       const block = document.createElement("div");
-      block.innerHTML = data.content;
+      const sectionDocument = parseDocument(data.content);
+      for (const child of Array.from(sectionDocument.body.childNodes))
+        block.appendChild(document.importNode(child, true));
       main.appendChild(block);
     } else {
       if (!Array.isArray(data.specifications)) return undefined;
@@ -127,14 +140,25 @@ export function inspectMdnRepresentation(
       main.appendChild(list);
     }
   }
+  if (omitted.size) {
+    completeness = "incomplete";
+    notes.push(`Publisher sections omitted: ${[...omitted].join(", ")}.`);
+  }
   return {
     html: document.documentElement.outerHTML,
+    notes,
     resolvedUrl: identity.href,
     completeness,
     metadata: {
-      title: pageTitle,
-      updated: typeof doc.modified === "string" ? doc.modified : undefined,
-      language: typeof doc.locale === "string" ? doc.locale : undefined,
+      title: cleanText(pageTitle, METADATA_LIMITS.title),
+      updated: cleanText(
+        typeof doc.modified === "string" ? doc.modified : undefined,
+        METADATA_LIMITS.updated,
+      ),
+      language: cleanText(
+        typeof doc.locale === "string" ? doc.locale : undefined,
+        METADATA_LIMITS.language,
+      ),
     },
   };
 }

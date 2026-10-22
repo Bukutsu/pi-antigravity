@@ -10,7 +10,9 @@ import {
 import { AntigravityRequestType, AntigravityUserAgent, GeminiRole } from "../types/enums.js";
 import { decodeHtmlEntities } from "../utils/html.js";
 import { antigravityFetch } from "../utils/http.js";
-import { safeError } from "../utils/security.js";
+import { redactSecrets, safeError } from "../utils/security.js";
+import { cleanText, repairText } from "../utils/text.js";
+import { checkPublicUrl, isGloballyRoutable } from "../utils/address.js";
 import { antigravityEnv, antigravityRequestEnvelope, isRecord } from "../utils/util.js";
 
 /** Default search model: fast grounding model for interactive tool calls. */
@@ -315,16 +317,28 @@ const PAGE_TITLE_BYTE_CAP = 64 * 1024;
 const PAGE_TITLE_MAX_HOPS = 3;
 
 const SOURCE_CACHE_LIMIT = 500;
-const resolvedUrlCache = new Map<string, string>();
-const pageTitleCache = new Map<string, string>();
+type CachedSource = { value: string; expires: number };
+const resolvedUrlCache = new Map<string, CachedSource>();
+const pageTitleCache = new Map<string, CachedSource>();
+function cached(map: Map<string, CachedSource>, key: string): string | undefined {
+  const entry = map.get(key);
+  if (!entry) return undefined;
+  if (entry.expires <= Date.now()) {
+    map.delete(key);
+    return undefined;
+  }
+  return entry.value;
+}
 
 /** Insert into a bounded cache, evicting the oldest entry once it is full. */
-function remember(map: Map<string, string>, key: string, value: string): void {
+function remember(map: Map<string, CachedSource>, key: string, value: string): void {
+  // Secret-bearing URLs remain request-scoped; never reuse a redacted URL for fetching.
+  if (redactSecrets(key) !== key || redactSecrets(value) !== value) return;
   if (map.size >= SOURCE_CACHE_LIMIT) {
     const oldest = map.keys().next().value;
     if (oldest !== undefined) map.delete(oldest);
   }
-  map.set(key, value);
+  map.set(key, { value, expires: Date.now() + 10 * 60_000 });
 }
 
 /** Combined signal that still has a deadline when the caller supplied its own. */
@@ -349,104 +363,20 @@ function hostnameOf(url: string): string {
   }
 }
 
-/**
- * True for an address this process must never be pointed at by a search result.
- *
- * `URL.hostname` keeps the brackets around an IPv6 literal, so they come off before the
- * check: `[::1]` would otherwise look like a hostname instead of an address.
- */
-export function isPrivateAddress(address: string): boolean {
-  const bare = address.startsWith("[") && address.endsWith("]") ? address.slice(1, -1) : address;
-  // A zone identifier (`fe80::1%eth0`) is scoped to a local interface.
-  const addressOnly = bare.split("%")[0];
-  const version = isIP(addressOnly);
-  if (version === 4) {
-    const [a = 0, b = 0] = addressOnly.split(".").map(Number);
-    if (a === 0 || a === 10 || a === 127) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true; // carrier-grade NAT
-    if (a === 169 && b === 254) return true; // link-local, and the metadata endpoint
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking range
-    return a >= 224; // multicast, then reserved
-  }
-  if (version === 6) {
-    let lowered: string;
-    try {
-      lowered = new URL(`http://[${addressOnly}]/`).hostname.slice(1, -1);
-    } catch {
-      return true; // fail closed if an IPv6 literal cannot be canonicalized
-    }
-    if (lowered === "::" || lowered === "::1") return true;
-    if (/^f[cd]/.test(lowered)) return true; // unique local
-    if (/^fe[89ab]/.test(lowered)) return true; // link-local
-    if (/^fe[c-f]/.test(lowered)) return true; // site-local
-    if (/^ff/.test(lowered)) return true; // multicast
-    // URL canonicalization renders mapped IPv4 addresses as two hexadecimal words.
-    const mapped = /^::ffff:([0-9a-f]+):([0-9a-f]+)$/.exec(lowered);
-    const translated = /^::ffff:0:([0-9a-f]+):([0-9a-f]+)$/.exec(lowered);
-    const embedded = mapped ?? translated;
-    if (embedded) {
-      const octets = embedded.slice(1).flatMap((word) => {
-        const value = parseInt(word, 16);
-        return [value >> 8, value & 255];
-      });
-      return isPrivateAddress(octets.join("."));
-    }
-    const words = ipv6Words(lowered);
-    if (!words) return true;
-    if (words[0] === 0x64 && words[1] === 0xff9b && words.slice(2, 6).every((word) => word === 0))
-      return true; // NAT64
-    if (words[0] === 0x2002) return true; // 6to4
-    if (words[0] === 0x100 && words.slice(1, 4).every((word) => word === 0)) return true; // discard
-    if (words[0] === 0x2001 && words[1] === 0x0db8) return true; // documentation
-    // IPv4-compatible/deprecated addresses still embed a local IPv4 target.
-    if (/^::/.test(lowered)) return true;
-    return false;
-  }
-  return false;
-}
-
-/** Expand a canonical IPv6 literal into eight 16-bit words. */
-function ipv6Words(address: string): number[] | undefined {
-  const halves = address.split("::");
-  if (halves.length > 2) return undefined;
-  const left = halves[0] ? halves[0].split(":") : [];
-  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
-  const missing = 8 - left.length - right.length;
-  if (missing < 0 || (halves.length === 1 && missing !== 0)) return undefined;
-  const words = [...left, ...Array<string>(missing).fill("0"), ...right].map((word) =>
-    Number.parseInt(word, 16),
-  );
-  return words.every((word) => Number.isInteger(word) && word >= 0 && word <= 0xffff)
-    ? words
-    : undefined;
-}
+export { isPrivateAddress } from "../utils/address.js";
 
 /**
- * Whether a page URL is safe to request: http(s), a public literal, and not a name that
- * resolves somewhere internal.
- *
- * Resolving first narrows the window but does not close it, because `fetch` resolves
- * again when it connects. Closing it outright takes a private dispatcher, and this
- * provider deliberately leaves the host's proxy-aware dispatcher in place, so treat this
- * as a filter rather than as a guarantee.
+ * Search contacts origins itself, so it also rejects names resolving to non-public
+ * addresses. This is a filter, not DNS pinning: the proxy-aware fetch resolves again.
  */
 async function isFetchablePageUrl(rawUrl: string): Promise<boolean> {
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
-  if (!host || isPrivateAddress(host)) return false;
-  if (/^(.*\.)?(localhost|local|internal|home\.arpa)$/.test(host)) return false;
-  if (isIP(host)) return true; // a public literal, already checked above
+  const checked = checkPublicUrl(rawUrl);
+  if (!checked.ok) return false;
+  const host = new URL(checked.url).hostname.replace(/^\[|\]$/g, "");
+  if (isIP(host)) return true;
   try {
     const records = await lookup(host, { all: true });
-    return records.length > 0 && records.every((record) => !isPrivateAddress(record.address));
+    return records.length > 0 && records.every((record) => isGloballyRoutable(record.address));
   } catch {
     return false;
   }
@@ -503,6 +433,7 @@ export function sourceLabel(source: SearchSource): string {
 }
 /** True only for the Google grounding redirect host, never a URL that merely mentions it. */
 function isGroundingRedirectUrl(raw: string): boolean {
+  if (!checkPublicUrl(raw).ok) return false;
   try {
     const parsed = new URL(raw);
     const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
@@ -643,9 +574,9 @@ async function enrichSources(sources: SearchSource[], signal?: AbortSignal): Pro
       if (!isGroundingRedirectUrl(redirect)) {
         source.resolvedUrl = redirect;
       } else {
-        const cached = resolvedUrlCache.get(redirect);
-        if (cached !== undefined) {
-          source.resolvedUrl = cached;
+        const resolved = cached(resolvedUrlCache, redirect);
+        if (resolved !== undefined) {
+          source.resolvedUrl = resolved;
         } else {
           const resolved = await resolveGroundingRedirect(redirect, signal);
           if (resolved) {
@@ -656,7 +587,7 @@ async function enrichSources(sources: SearchSource[], signal?: AbortSignal): Pro
       }
 
       const target = source.resolvedUrl ?? source.url;
-      const cachedTitle = pageTitleCache.get(target);
+      const cachedTitle = cached(pageTitleCache, target);
       if (cachedTitle !== undefined) {
         source.pageTitle = cachedTitle;
       } else {
@@ -678,12 +609,16 @@ async function enrichSources(sources: SearchSource[], signal?: AbortSignal): Pro
 
 /** Keep a label from breaking out of its link slot or its list line. */
 function escapeLinkText(text: string): string {
-  return text.replace(/[[\]]/g, "\\$&").replace(/\s+/g, " ");
+  return (cleanText(redactSecrets(text), 300) ?? "").replace(/[[\]]/g, "\\$&");
 }
 
 /** Encode characters that would close a Markdown link destination. */
 function escapeLinkDestination(url: string): string {
-  return url.replace(/\)/g, "%29").replace(/ /g, "%20");
+  const checked = checkPublicUrl(url);
+  if (!checked.ok) return "";
+  return redactSecrets(url).replace(/[<>()\\\s]/g, (char) =>
+    char === "(" ? "%28" : char === ")" ? "%29" : encodeURIComponent(char),
+  );
 }
 
 /** One contiguous claim, carrying every source index that supports it. */
@@ -807,6 +742,7 @@ function citeSearchText(res: SearchResult): string {
 
   const bySourceIndex = new Map<number, { number: number; label: string; url: string }>();
   res.sources.forEach((source, position) => {
+    if (!checkPublicUrl(source.resolvedUrl ?? source.url).ok) return;
     const sourceIndex = source.index ?? position;
     bySourceIndex.set(sourceIndex, {
       number: sourceIndex + 1,
@@ -903,10 +839,12 @@ export function formatSearchResult(res: SearchResult): string {
   if (res.sources.length > 0) {
     const list = res.sources
       .map((s, index) => {
+        if (!checkPublicUrl(s.resolvedUrl ?? s.url).ok) return "";
         const number = res.supports?.length ? `[${(s.index ?? index) + 1}] ` : "";
         const url = s.resolvedUrl ?? s.url;
         return `- ${number}[${escapeLinkText(sourceLabel(s))}](${escapeLinkDestination(url)})`;
       })
+      .filter(Boolean)
       .join("\n");
     sections.push(`### Sources\n${list}`);
   }
@@ -916,7 +854,7 @@ export function formatSearchResult(res: SearchResult): string {
     sections.push(`*Search queries: ${queries}*`);
   }
 
-  return sections.join("\n\n");
+  return repairText(redactSecrets(sections.join("\n\n")));
 }
 
 /**

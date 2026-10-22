@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { MAX_SNAPSHOT_CHARS, type WebFetchResult } from "./web-fetch.js";
+import type { WebFetchResult } from "./web-fetch.js";
+import { MAX_SNAPSHOT_CHARS } from "./limits.js";
 
 /** Small, session-local capture store. Reads never refetch a changing document. */
 export function createSnapshotStore() {
@@ -11,12 +12,11 @@ export function createSnapshotStore() {
     clear() {
       entries.clear();
     },
-    put(result: WebFetchResult): string | undefined {
+    put(result: WebFetchResult, id: string = randomUUID()): string | undefined {
       prune();
       // Bound both entries and document size; oversized results remain ordinary fetch results.
       if (!result.fullContent || result.fullContent.length > MAX_SNAPSHOT_CHARS) return undefined;
       while (entries.size >= 4) entries.delete(entries.keys().next().value!);
-      const id = randomUUID();
       entries.set(id, { result, expires: Date.now() + 10 * 60_000 });
       return id;
     },

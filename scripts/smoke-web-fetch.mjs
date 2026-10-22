@@ -1,6 +1,7 @@
 // Opt-in integration check: real tool handler, credentials, and Google requests.
 // Only the Pi host is minimal. No mocked fetches or saved page captures.
 import assert from "node:assert/strict";
+import { classifyFetchSmoke, isUpstreamAvailabilityError } from "./smoke-fetch-policy.js";
 import { readJson, authPath } from "./fs-json.mjs";
 import { refreshAntigravityToken } from "../src/auth/index.js";
 import { redactSecrets } from "../src/utils/index.js";
@@ -53,6 +54,7 @@ function pageText(result) {
 }
 const counts = { pass: 0, warn: 0, fail: 0 };
 let continuationChecked = false;
+let insufficientCoverage = false;
 let requests = 0;
 const originalFetch = globalThis.fetch;
 const previousCap = process.env.ANTIGRAVITY_WEB_FETCH_MAX_CHARS;
@@ -65,6 +67,7 @@ try {
       const requestsBefore = requests;
       const result = await tool.execute(label, { url }, AbortSignal.timeout(30_000), undefined, context);
       const text = textOf(result);
+      assert.ok(text.length + JSON.stringify(result.details).length <= 1000, "Text and details exceed the configured character cap");
       const details = result.details;
       assert.ok(requests > requestsBefore, "URL fetch did not use the observed transport");
       assert.ok(["cache", "live"].includes(details.source), "Missing retrieval provenance");
@@ -84,8 +87,9 @@ try {
         assert.ok(details.snapshot && Number.isSafeInteger(details.nextOffset) && details.nextOffset > 0, "Invalid continuation");
         const before = { requests, credentialReads };
         let offset = details.nextOffset;
-        for (let range = 0; offset !== undefined && range < 8; range += 1) {
+        for (let range = 0; offset !== undefined && range < 32; range += 1) {
           const next = await tool.execute(label + "-next", { snapshot: details.snapshot, offset }, AbortSignal.timeout(5_000), undefined, context);
+          assert.ok(textOf(next).length + JSON.stringify(next.details).length <= 1000, "Continuation text and details exceed the configured character cap");
           assert.equal(requests, before.requests, "Snapshot continuation made a network request");
           assert.equal(credentialReads, before.credentialReads, "Snapshot continuation consulted credentials");
           assert.equal(next.details.snapshot, details.snapshot, "Snapshot identity changed");
@@ -99,15 +103,18 @@ try {
       }
       const found = available.toLowerCase().includes(expected.toLowerCase());
       // Missing stable page markers fail. The resolver may not reveal the MDN canonical alias.
-      const status = !found || details.assessment !== "readable" ? "fail" : canonicalObserved ? "pass" : "warn";
+      const verdict = classifyFetchSmoke({ found, canonicalObserved, ...details });
+      const status = verdict.status;
+      insufficientCoverage ||= verdict.insufficientCoverage;
       counts[status] += 1;
       console.log(`${status.toUpperCase()} ${label}: ${Math.round(performance.now() - started)} ms; source=${details.source}; partial=${details.partial}; assessment=${details.assessment}; expected text ${found ? "found" : "not found in checked ranges"}${canonicalObserved ? "" : "; expected MDN canonical URL not observed"}`);
     } catch (error) {
       const message = redactSecrets(error instanceof Error ? error.message : String(error)).replaceAll(credentials.access, "[redacted]");
       const upstream = !(error instanceof assert.AssertionError) &&
-        /HTTP (?:404|408|429|5\d\d)|no readable article content|overall 10-second deadline|Web fetch aborted|ECONNRESET|ETIMEDOUT|ENOTFOUND/i.test(message);
+        isUpstreamAvailabilityError(message);
       const status = upstream ? "warn" : "fail";
       counts[status] += 1;
+      insufficientCoverage ||= upstream;
       console.log(`${status.toUpperCase()} ${label}: ${Math.round(performance.now() - started)} ms; ${message.slice(0, 300)}`);
     }
   }
@@ -119,4 +126,4 @@ try {
 console.log(`Fetch smoke: ${counts.pass} passed, ${counts.warn} warnings, ${counts.fail} failed; offline continuation ${continuationChecked ? "checked" : "not checked"}.`);
 console.log("Live results vary; this check does not certify full-page coverage.");
 // Distinguish a broken contract (1) from insufficient live coverage (2).
-process.exitCode = counts.fail ? 1 : (!counts.pass || !continuationChecked) ? 2 : 0;
+process.exitCode = counts.fail ? 1 : (insufficientCoverage || !counts.pass || !continuationChecked) ? 2 : 0;

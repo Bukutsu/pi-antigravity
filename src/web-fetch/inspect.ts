@@ -1,5 +1,8 @@
-import { createDocument } from "@mixmark-io/domino";
+import { parseDocument } from "./document.js";
+import { advanceFence, FENCE_LINE, type Fence } from "./fences.js";
+import { repairText } from "../utils/text.js";
 import { isRecord } from "../utils/util.js";
+import { METADATA_LIMITS } from "./metadata.js";
 import {
   classifyCopyCompleteness,
   extractPageMetadata,
@@ -14,6 +17,7 @@ export type PageInspection = {
   rendered: string;
   completeness: "complete" | "incomplete" | "unknown";
   assessment: ContentAssessment;
+  notes?: string[];
   metadata: ReturnType<typeof extractPageMetadata> & {
     author?: string;
     published?: string;
@@ -53,6 +57,14 @@ const ACCESS_WALL_HEADINGS = [
  */
 const ACCESS_WALL_OPENINGS = [
   "just a moment",
+  "just a second",
+  "one more step",
+  "robot or human",
+  "please wait while we verify",
+  "access to this page has been denied",
+  "you don't have permission",
+  "verifying your browser",
+  "too many requests",
   "verify you are human",
   "verifying you are human",
   "attention required",
@@ -85,10 +97,20 @@ function isAccessWallHeading(value: string | undefined): boolean {
   if (!text) return false;
   if (ACCESS_WALL_HEADINGS.includes(text.replace(/[.!…\s]*$/, ""))) return true;
   const opens = (opening: string, tail: number) =>
-    text.startsWith(opening) && text.length - opening.length <= tail;
+    text.startsWith(opening) &&
+    (text.length - opening.length <= tail || /browser|human|verify|access/.test(text));
   return (
     ACCESS_WALL_OPENINGS.some((opening) => opens(opening, ACCESS_WALL_TAIL)) ||
     ACCESS_WALL_SIGN_IN_OPENINGS.some((opening) => opens(opening, ACCESS_WALL_SIGN_IN_TAIL))
+  );
+}
+
+/** A wall heading alone cannot overrule substantial article content. */
+function hasArticleContent(rendered: string): boolean {
+  const body = rendered.replace(/^#{1,6} .*$/gm, "").trim();
+  return (
+    (body.length >= 500 && /[.!?:]/.test(body)) ||
+    (body.length >= 80 && /\b(?:HTTP|status code|response|client|server)\b/i.test(body))
   );
 }
 
@@ -113,20 +135,13 @@ function pageIdentity(value: unknown, baseUrl: string): string | undefined {
 /** Inspect data before destructive Markdown cleanup; never execute page scripts. */
 export function inspectPage(content: string, url: string, contentType?: string): PageInspection {
   if (!looksLikeHtml(content, contentType)) {
-    const rendered = content.trim();
+    const rendered = repairText(content).trim();
     let title: string | undefined;
-    let fence: string | undefined;
+    let fence: Fence | undefined;
     for (const line of rendered.split("\n")) {
-      const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-      if (delimiter) {
-        if (!fence) fence = delimiter[1];
-        else if (
-          delimiter[1][0] === fence[0] &&
-          delimiter[1].length >= fence.length &&
-          !delimiter[2].trim()
-        )
-          fence = undefined;
-      } else if (!fence) {
+      const previous = fence;
+      fence = advanceFence(fence, line);
+      if (!previous && !fence && !FENCE_LINE.test(line)) {
         title = /^ {0,3}# +(.+?)(?: +#+)?\s*$/.exec(line)?.[1];
         if (title) break;
       }
@@ -139,8 +154,8 @@ export function inspectPage(content: string, url: string, contentType?: string):
       alternates: [],
     };
   }
-  const document = createDocument(content);
-  const metadata: PageInspection["metadata"] = extractPageMetadata(content);
+  const document = parseDocument(content);
+  const metadata: PageInspection["metadata"] = extractPageMetadata(content, document);
   metadata.language = sanitizeMetadataText(document.documentElement.lang || undefined, 50);
   const nodes: Record<string, unknown>[] = [];
   let budget = 256_000;
@@ -166,26 +181,31 @@ export function inspectPage(content: string, url: string, contentType?: string):
   const article = nodes.find((node) => {
     const types = Array.isArray(node["@type"]) ? node["@type"] : [node["@type"]];
     return (
-      types.some((type) => /^(Article|NewsArticle|BlogPosting|TechArticle)$/.test(String(type))) &&
+      types.some(
+        (type) =>
+          typeof type === "string" && /^(Article|NewsArticle|BlogPosting|TechArticle)$/.test(type),
+      ) &&
       [node.url, node.mainEntityOfPage, node["@id"]].some(
         (value) => pageIdentity(value, url) === identity,
       )
     );
   });
   if (article) {
-    const text = (value: unknown) =>
-      typeof value === "string" && value.trim() ? sanitizeMetadataText(value, 1000) : undefined;
-    metadata.title ??= text(article.headline);
-    metadata.description ??= text(article.description);
-    metadata.updated ??= text(article.dateModified);
-    metadata.published = text(article.datePublished);
-    metadata.language ??= text(article.inLanguage);
+    const text = (value: unknown, field: keyof typeof METADATA_LIMITS) =>
+      typeof value === "string" && value.trim()
+        ? sanitizeMetadataText(value, METADATA_LIMITS[field])
+        : undefined;
+    metadata.title ??= text(article.headline, "title");
+    metadata.description ??= text(article.description, "description");
+    metadata.updated ??= text(article.dateModified, "updated");
+    metadata.published = text(article.datePublished, "published");
+    metadata.language ??= text(article.inLanguage, "language");
     const author: unknown = Array.isArray(article.author) ? article.author[0] : article.author;
     const person: unknown =
       isRecord(author) && !author.name && typeof author["@id"] === "string"
         ? nodes.find((node) => node["@id"] === author["@id"])
         : author;
-    metadata.author = isRecord(person) ? text(person.name) : text(person);
+    metadata.author = isRecord(person) ? text(person.name, "author") : text(person, "author");
   }
 
   const alternates: PageInspection["alternates"] = [];
@@ -222,20 +242,24 @@ export function inspectPage(content: string, url: string, contentType?: string):
     : alternates;
   const preferred = sameLanguage.length ? sameLanguage : alternates;
   preferred.sort((a, b) => Number(b.type === "text/markdown") - Number(a.type === "text/markdown"));
-  const rendered = htmlToMarkdown(content, { baseUrl: url });
-  const heading = document.querySelector("h1")?.textContent?.trim() || metadata.title || "";
+  const appScript = Boolean(document.querySelector('script[src], script[type="module"]'));
+  const rendered = htmlToMarkdown(content, { baseUrl: url, document });
+  const heading = /^# +(.+)$/m.exec(rendered)?.[1] || "";
   // A page that loads an application script and shows nothing else is a shell.
   const completeness = classifyCopyCompleteness(content);
   // A page that loads application JavaScript and shows only a placeholder is a shell.
-  const appScript = Boolean(document.querySelector('script[src], script[type="module"]'));
   const assessment: ContentAssessment = !rendered.trim()
     ? // A copy that ends before the content is cut off, not an application shell.
       appScript && completeness !== "incomplete"
       ? "suspected-shell"
       : "empty"
-    : isAccessWallHeading(heading) || isAccessWallHeading(metadata.title)
+    : isAccessWallHeading(heading || metadata.title) &&
+        /\b(?:check(?:ing)?|verif\w*|captcha|blocked|denied|permission|enable javascript|sign in|log in)\b/i.test(
+          rendered.replace(/^#{1,6} .*$/gm, ""),
+        ) &&
+        !hasArticleContent(rendered)
       ? "suspected-access-wall"
-      : (appScript && isLoadingShell(rendered)) || !rendered.replace(/^#{1,6} .*$/gm, "").trim()
+      : appScript && isLoadingShell(rendered)
         ? "suspected-shell"
         : "readable";
   return {

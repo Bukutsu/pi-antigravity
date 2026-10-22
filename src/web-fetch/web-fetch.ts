@@ -20,35 +20,45 @@ import {
   jsonOrTextError,
   parseApiKey,
 } from "../client/client.js";
-import { isPrivateAddress } from "../search/index.js";
+import { checkPublicUrl } from "../utils/address.js";
 import { antigravityFetch } from "../utils/http.js";
+import {
+  boundaryBack,
+  boundaryForward,
+  capText,
+  cleanText,
+  elideMiddle,
+  repairText,
+} from "../utils/text.js";
 import { redactSecrets, safeError } from "../utils/security.js";
 import { antigravityEnv, isRecord } from "../utils/util.js";
-import { looksLikeHtml, sanitizeMetadataText } from "./markdown.js";
+import { looksLikeHtml } from "./markdown.js";
 
 import { articleRepresentation, inspectPage, type PageInspection } from "./inspect.js";
 import { inspectMdnRepresentation, mdnRepresentationUrl } from "./mdn.js";
+import { mediaKind } from "./media.js";
+import {
+  DEFAULT_WEB_FETCH_MAX_CHARS,
+  WEB_FETCH_TIMEOUT_MS,
+  MAX_RESPONSE_BYTES,
+  MAX_SNAPSHOT_CHARS,
+} from "./limits.js";
+import { formatWebFetchHeader } from "./header.js";
+import { FENCE_LINE, unclosedFence } from "./fences.js";
+import {
+  runWithDiagnostics,
+  setLastEndpoint,
+  setLastStatus,
+  setLastError,
+  setLastLatencyMs,
+  setLastFetchTrace,
+} from "../diagnostics/index.js";
 
 export const REWRITE_URI_PATH = "/v1internal:rewriteUri";
 export const TRAWLER_FETCH_PATH = "/v1internal:fetchFromTrawlerCache";
 
-/** Output budget for one page, in characters. Roughly 15k tokens of prose. */
-export const DEFAULT_WEB_FETCH_MAX_CHARS = 60_000;
-
-/** Shared network budget, including redirects, endpoint failover, and recovery. */
-export const WEB_FETCH_TIMEOUT_MS = 10_000;
-
-/** Reject an oversized service response before parsing or retaining it. */
-const MAX_RESPONSE_BYTES = 5_000_000;
-
-/** Largest rendering retained for snapshot continuation reads. */
-export const MAX_SNAPSHOT_CHARS = 2_000_000;
-
-/** Leave room for the header and continuation footer inside the output budget. */
-const OUTPUT_FOOTER_RESERVE = 512;
-
-/** Hosts that name the local machine or a private network rather than a public site. */
-const LOCAL_HOST_SUFFIXES = ["localhost", "local", "localdomain", "internal", "home.arpa"];
+export { DEFAULT_WEB_FETCH_MAX_CHARS, WEB_FETCH_TIMEOUT_MS, MAX_SNAPSHOT_CHARS } from "./limits.js";
+export { formatWebFetchHeader } from "./header.js";
 
 export type WebFetchSource = "cache" | "live";
 
@@ -60,15 +70,19 @@ export type WebFetchOptions = {
   raw?: boolean;
   /** Character budget for the returned content. */
   maxChars?: number;
+  /** Testable network deadline; defaults to ten seconds. */
+  timeoutMs?: number;
   signal?: AbortSignal;
 };
 
 export type WebFetchResult = {
   /** URL as requested. */
   requestedUrl: string;
+  /** Whether the raw requested and resolved URLs differed before display redaction. */
+  redirected?: boolean;
   /** URL the fetch service finally read, after any redirect. */
   resolvedUrl: string;
-  /** Converted page content, already truncated to the character budget. */
+  /** Converted page content; each consumer owns its complete output budget. */
   content: string;
   title?: string;
   description?: string;
@@ -85,11 +99,18 @@ export type WebFetchResult = {
   /** Assessment of the extracted content, independent of source completeness. */
   assessment?: PageInspection["assessment"];
   author?: string;
+  notes?: string[];
   published?: string;
   language?: string;
   /** Actual fetched representation, when different from the article URL. */
   representationUrl?: string;
-  attempts?: Array<{ url: string; source: WebFetchSource; outcome: string }>;
+  attempts?: Array<{
+    url: string;
+    source: WebFetchSource;
+    outcome: string;
+    endpoint?: string;
+    stage?: string;
+  }>;
   /** Character budget used for this result, including header and footer space. */
   maxChars?: number;
   /** Uncapped rendering for bounded, in-memory continuation reads. Not model-facing. */
@@ -106,31 +127,19 @@ export type WebFetchResult = {
  * sent with the request, but are redacted from displayed output and errors.
  */
 export function validateFetchTarget(raw: string): string {
-  const trimmed = raw?.trim() ?? "";
-  if (!trimmed) throw new Error("A URL is required.");
-  let parsed: URL;
-  try {
-    parsed = new URL(trimmed);
-  } catch {
-    throw new Error("Not a valid public HTTP(S) URL.");
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error(`Only http and https URLs can be read (got ${parsed.protocol})`);
-  }
-  if (parsed.username || parsed.password) {
-    throw new Error("URLs with embedded credentials are not supported.");
-  }
-  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
-  const localName = LOCAL_HOST_SUFFIXES.some(
-    (suffix) => host === suffix || host.endsWith(`.${suffix}`),
-  );
-  if (!host || localName || isPrivateAddress(host)) {
-    throw Object.assign(
-      new Error("That URL is a private or local address, which the fetch service cannot reach."),
-      { unsafeTarget: true },
-    );
-  }
-  return parsed.toString();
+  const checked = checkPublicUrl(raw);
+  if (checked.ok) return checked.url;
+  const messages = {
+    missing: "A URL is required.",
+    invalid: "Not a valid public HTTP(S) URL.",
+    scheme: "Only http and https URLs can be read.",
+    credentials: "URLs with embedded credentials are not supported.",
+    local: "That URL is a private or local address, which the fetch service cannot reach.",
+    "too-long": "The URL exceeds the 2,048-character limit.",
+  };
+  throw Object.assign(new Error(messages[checked.reason]), {
+    unsafeTarget: checked.reason !== "invalid",
+  });
 }
 
 const PDF_GUIDANCE =
@@ -138,30 +147,31 @@ const PDF_GUIDANCE =
   "If permitted, use an available download tool or terminal to download it directly, then read the local file with a PDF reader. " +
   "Downloading alone does not extract its text.";
 
-function pdfError(): Error {
-  return Object.assign(new Error(PDF_GUIDANCE), { fatal: true, status: 415 });
+function pdfError(url?: string): Error {
+  return Object.assign(
+    new Error(`${url ? `Unsupported representation ${redactSecrets(url)}: ` : ""}${PDF_GUIDANCE}`),
+    { fatal: true, status: 415 },
+  );
 }
 
-/** ISO 32000 allows the PDF header within the first 1024 bytes of a file. */
+/** A small leading text window for signature detection, not PDF parsing. */
 const PDF_HEADER_WINDOW = 1_024;
 
 function isPdfContentType(contentType?: string): boolean {
-  return /^application\/pdf\b/i.test(contentType ?? "");
+  return mediaKind(contentType) === "pdf";
 }
 
 /** PDF detection is not limited to a URL suffix; inspect the returned representation too. */
 function isPdfContent(content: string, contentType?: string): boolean {
   if (isPdfContentType(contentType)) return true;
-  if (/^\s*%PDF-/i.test(content)) return true;
-  // A file may carry a preamble before its header, but markup is never a PDF.
-  const head = content.slice(0, PDF_HEADER_WINDOW);
-  if (/^\s*</.test(head)) return false;
-  return /%PDF-\d/.test(head);
+  // A PDF signature must begin a line, followed by a version. Prose mentioning
+  // "%PDF-1.7" is not a binary document.
+  return /(?:^|[\r\n])%PDF-\d\.\d(?:[\r\n]|$)/.test(content.slice(0, PDF_HEADER_WINDOW));
 }
 
 /** Reject known PDF URLs with guidance for the calling agent. */
 function rejectPdfUrl(url: string): void {
-  if (/\.pdf$/i.test(new URL(url).pathname)) throw pdfError();
+  if (/\.pdf$/i.test(new URL(url).pathname)) throw pdfError(url);
 }
 
 /** Request body for the redirect resolver. */
@@ -197,7 +207,8 @@ export function parseRedirectUri(data: unknown): string | undefined {
 export function parseTrawlerContent(data: unknown): string | undefined {
   const body = unwrapResponse(data);
   if (!isRecord(body)) return undefined;
-  return firstNonEmptyText(body.content, body.markdownContent);
+  const content = firstNonEmptyText(body.content, body.markdownContent);
+  return content === undefined ? undefined : repairText(content);
 }
 
 /** Explicit media type from a trawler response, when the service reports one. */
@@ -288,12 +299,14 @@ async function postJson(
   body: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<JsonPost> {
+  setLastEndpoint(endpoint);
   const response = await antigravityFetch(`${endpoint}${path}`, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
     signal,
   });
+  setLastStatus(response.status);
   const text = await readResponseText(response);
   let data: unknown;
   try {
@@ -304,14 +317,29 @@ async function postJson(
   return { status: response.status, data, text };
 }
 
-/** Error carrying `fatal` when retrying another endpoint cannot help. */
-function fetchError(text: string, status: number, stage: "cache" | "live"): Error {
-  const detail = redactSecrets(jsonOrTextError(text)).slice(0, 400) || `HTTP ${status}`;
+type RetrievalStage = "cache" | "live" | "representation";
+/** A cache miss is not a page failure; all other stages share the same status policy. */
+export function statusAction(
+  stage: RetrievalStage,
+  status: number,
+): "content" | "missing" | "recover" | "stop" {
+  if (status === 200) return "content";
+  if (status === 401 || status === 403) return "stop";
+  if (stage === "cache" && (status < 400 || status === 404 || status === 410)) return "missing";
+  return status === 429 || status >= 500 ? "recover" : "stop";
+}
+
+/** Error carrying a stage-independent retry/refusal decision. */
+function fetchError(text: string, status: number, stage: RetrievalStage): Error {
+  const detail = capText(repairText(redactSecrets(jsonOrTextError(text))), 400) || `HTTP ${status}`;
   const message =
     stage === "cache"
       ? `The crawl cache could not answer (HTTP ${status}: ${detail}).`
       : `The live fetch failed (HTTP ${status}: ${detail}). Try again later, or open the page in a browser.`;
-  return Object.assign(new Error(message), { fatal: status < 500 && status !== 429, status });
+  return Object.assign(new Error(message), {
+    fatal: statusAction(stage, status) === "stop",
+    status,
+  });
 }
 
 /** Whether a validation failure names a private or local destination. */
@@ -326,10 +354,11 @@ async function resolveRedirect(
   headers: Record<string, string>,
   signal?: AbortSignal,
   strict = false,
+  request = postJson,
 ): Promise<string | undefined> {
   let redirect: string | undefined;
   try {
-    const response = await postJson(
+    const response = await request(
       endpoint,
       REWRITE_URI_PATH,
       headers,
@@ -360,38 +389,12 @@ async function resolveRedirect(
   } catch (error) {
     // An unsafe destination the service reports fails closed. A malformed or
     // unsupported target only costs the redirect, so the read continues.
-    if (strict || isUnsafeTarget(error)) throw error;
+    if (strict || isUnsafeTarget(error))
+      throw new Error(`The service reported an unsafe redirect: ${safeError(error)}`, {
+        cause: error,
+      });
     return undefined;
   }
-}
-
-const FENCE_LINE = /^ {0,3}((?:>\s*)*)(`{3,}|~{3,})(.*)$/;
-
-/** Return an unmatched fenced-code delimiter, if the Markdown ends inside one. */
-function unclosedFence(
-  markdown: string,
-): { marker: string; length: number; prefix: string } | undefined {
-  let open: { marker: string; length: number; prefix: string } | undefined;
-  for (const line of markdown.split("\n")) {
-    const match = FENCE_LINE.exec(line);
-    if (!match) continue;
-    const prefix = match[1];
-    const delimiter = match[2];
-    const rest = match[3];
-    const marker = delimiter[0];
-    if (!open) {
-      if (marker === "`" && rest.includes("`")) continue;
-      open = { marker, length: delimiter.length, prefix };
-    } else if (
-      marker === open.marker &&
-      delimiter.length >= open.length &&
-      prefix === open.prefix &&
-      !rest.trim()
-    ) {
-      open = undefined;
-    }
-  }
-  return open;
 }
 
 /** Close a code fence the character cap cut through, so the note is not read as code. */
@@ -412,7 +415,7 @@ function splitsSurrogate(text: string, index: number): boolean {
 /** Move a character boundary off a surrogate pair and outside a fence delimiter line. */
 function safeTruncate(text: string, end: number, start = 0): number {
   let next = Math.min(text.length, Math.max(start, end));
-  if (splitsSurrogate(text, next)) next += 1;
+  next = boundaryForward(text, next);
   if (next <= start || next >= text.length) return next;
   const lineStart = text.lastIndexOf("\n", next - 1) + 1;
   const lineEndRaw = text.indexOf("\n", next);
@@ -426,100 +429,11 @@ function safeTruncate(text: string, end: number, start = 0): number {
   return next;
 }
 
-/** Move a continuation start out of the middle of a fence delimiter line. */
+/** Respect the source cursor; only repair a cut inside a surrogate pair. */
 function safeOffset(text: string, offset: number): number {
   if (offset <= 0) return 0;
   if (offset >= text.length) return text.length;
-  let next = splitsSurrogate(text, offset) ? offset - 1 : offset;
-  const lineStart = text.lastIndexOf("\n", next - 1) + 1;
-  const lineEndRaw = text.indexOf("\n", next);
-  const lineEnd = lineEndRaw < 0 ? text.length : lineEndRaw;
-  if (next > lineStart && next < lineEnd && FENCE_LINE.test(text.slice(lineStart, lineEnd)))
-    next = lineStart;
-  return next;
-}
-
-/** Elide the middle of a long value, keeping its head and tail. */
-function elideMiddle(value: string, limit: number): string {
-  if (value.length <= limit) return value;
-  if (limit <= 1) return "…".slice(0, limit);
-  const keep = limit - 1;
-  const head = Math.ceil(keep / 2);
-  const tail = keep - head;
-  return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
-}
-
-/** Format the page header, with bounded fields and redacted URLs. */
-export function formatWebFetchHeader(result: WebFetchResult): string {
-  const maxChars = result.maxChars ?? DEFAULT_WEB_FETCH_MAX_CHARS;
-  // Provenance must fit inside the output budget, so a long URL cannot take it all.
-  const headerBudget = Math.max(0, maxChars - OUTPUT_FOOTER_RESERVE);
-  const dropped = new Set<string>();
-  const build = (urlLimit: number, titleLimit: number): string[] => {
-    const text = (value: string | undefined, limit: number) => sanitizeMetadataText(value, limit);
-    const header = [`Title: ${text(result.title, titleLimit) ?? "Untitled page"}`];
-    const add = (label: string, value: string | undefined) => {
-      if (value === undefined || dropped.has(label)) return;
-      header.push(`${label}: ${value}`);
-    };
-    add("Description", text(result.description, 1_000));
-    add("Updated", text(result.updated, 100));
-    add("Author", text(result.author, 300));
-    add("Published", text(result.published, 100));
-    add("Language", text(result.language, 50));
-    const url = (value: string) =>
-      elideMiddle(sanitizeMetadataText(redactSecrets(value), 4_096) ?? "", urlLimit);
-    if (result.representationUrl) header.push(`Representation: ${url(result.representationUrl)}`);
-    if (result.attempts && result.attempts.length > 1) {
-      const attempts = result.attempts.map(
-        (attempt) => `${attempt.source}: ${text(attempt.outcome, 200) ?? ""}`,
-      );
-      header.push(`Retrieval: ${attempts.join("; ")}`);
-    }
-    if (result.assessment && result.assessment !== "readable") {
-      header.push(
-        `Content assessment: ${result.assessment} (heuristic; source completeness does not establish article coverage).`,
-      );
-    }
-    const requestedUrl = url(result.requestedUrl);
-    const resolvedUrl = url(result.resolvedUrl);
-    if (requestedUrl !== resolvedUrl) header.push(`Requested: ${requestedUrl}`);
-    header.push(`Source: ${resolvedUrl} (${result.source === "live" ? "live" : "cache"})`);
-    if (result.assessment === "suspected-shell") {
-      header.push(
-        "Note: this appears to be a JavaScript-rendered page; this tool cannot render it. Open it in a browser.",
-      );
-    } else if (result.partial === true) {
-      header.push(
-        result.content.trim()
-          ? "Note: the crawler's copy ends mid-page, so some content may be missing."
-          : "Note: the crawler's copy ends mid-page and holds no readable content.",
-      );
-    } else if (result.partial === null) {
-      header.push(
-        result.content.trim()
-          ? "Note: the crawler's copy has no clear end marker, so completeness is unknown."
-          : "Note: the crawler's copy has no clear end marker and holds no readable content.",
-      );
-    }
-    return header;
-  };
-  let urlLimit = Math.max(64, Math.min(2_048, Math.floor(headerBudget / 4)));
-  let titleLimit = Math.min(300, Math.max(40, Math.floor(headerBudget / 4)));
-  let header = build(urlLimit, titleLimit);
-  // Optional metadata must not crowd provenance and the next captured range out.
-  for (const label of ["Description", "Updated", "Author", "Published", "Language", "Retrieval"]) {
-    if (header.join("\n").length + 7 <= headerBudget) break;
-    dropped.add(label);
-    header = build(urlLimit, titleLimit);
-  }
-  // A long URL must not crowd out the page content either.
-  while (header.join("\n").length + 7 > headerBudget && urlLimit > 64) {
-    urlLimit = Math.max(64, Math.floor(urlLimit / 2));
-    titleLimit = Math.max(40, Math.floor(titleLimit / 2));
-    header = build(urlLimit, titleLimit);
-  }
-  return `${header.join("\n")}\n\n---\n\n`;
+  return boundaryBack(text, offset);
 }
 
 /** Format the rendered page, extract metadata, and apply the character budget. */
@@ -534,14 +448,20 @@ function toResult(params: {
   representationUrl?: string;
   attempts: NonNullable<WebFetchResult["attempts"]>;
 }): WebFetchResult {
-  const { requestedUrl, resolvedUrl, content, rendered, source, maxChars, inspection } = params;
+  const { requestedUrl, resolvedUrl, content, source, maxChars, inspection } = params;
+  // Redact caller/service URLs wherever the page echoes them, before snapshot offsets exist.
+  let rendered = repairText(params.rendered);
+  for (const url of [requestedUrl, resolvedUrl, params.representationUrl]) {
+    if (url) rendered = rendered.replaceAll(url, redactSecrets(url));
+  }
   const metadata = inspection.metadata;
   const completeness = inspection.completeness;
   const partial = completeness === "complete" ? false : completeness === "incomplete" ? true : null;
   const provisional: WebFetchResult = {
-    requestedUrl,
-    resolvedUrl,
-    content: "x",
+    requestedUrl: redactSecrets(requestedUrl),
+    resolvedUrl: redactSecrets(resolvedUrl),
+    redirected: requestedUrl !== resolvedUrl,
+    content: rendered,
     title: metadata.title,
     description: metadata.description,
     updated: metadata.updated,
@@ -550,27 +470,20 @@ function toResult(params: {
     truncated: false,
     partial,
     assessment: inspection.assessment,
+    notes: inspection.notes,
     author: metadata.author,
     published: metadata.published,
     language: metadata.language,
-    representationUrl: params.representationUrl,
+    representationUrl: params.representationUrl
+      ? redactSecrets(params.representationUrl)
+      : undefined,
     attempts: params.attempts,
     maxChars,
   };
-  const contentBudget = Math.max(
-    1,
-    maxChars - formatWebFetchHeader(provisional).length - OUTPUT_FOOTER_RESERVE,
-  );
-  const truncated = rendered.length > contentBudget;
-  const end = truncated ? safeTruncate(rendered, contentBudget) : rendered.length;
-  const text = truncated
-    ? `${keepFencesClosed(rendered.slice(0, end))}\n\n… [truncated at ${contentBudget} characters; the page is ${rendered.length}]`
-    : rendered;
   return {
     ...provisional,
-    content: text,
     bytes: new TextEncoder().encode(content).byteLength,
-    truncated,
+    truncated: rendered.length + formatWebFetchHeader(provisional).length > maxChars,
     fullContent: rendered.length <= MAX_SNAPSHOT_CHARS ? rendered : undefined,
   };
 }
@@ -588,8 +501,10 @@ export function readCapturedPage(
 } {
   const text = result.fullContent;
   if (text === undefined) throw new Error("This result has no captured rendering.");
-  if (!Number.isSafeInteger(offset) || offset < 0 || offset >= text.length)
-    throw new Error("Offset is outside the captured page.");
+  if (!Number.isSafeInteger(offset))
+    throw new Error("Offset must be a whole number. Use the returned nextOffset.");
+  if (offset < 0 || offset >= text.length)
+    throw new Error("Offset is outside the captured page. Use the returned nextOffset.");
   if (!Number.isSafeInteger(maxChars) || maxChars < 1)
     throw new Error("Page size must be a positive integer.");
   offset = safeOffset(text, offset);
@@ -603,6 +518,22 @@ export function readCapturedPage(
     nextOffset: end < text.length ? end : undefined,
     totalChars: text.length,
   };
+}
+
+function recordFailure(
+  attempt: NonNullable<WebFetchResult["attempts"]>[number],
+  error: unknown,
+  retained: boolean,
+  timedOut: boolean,
+): void {
+  const status = error instanceof Error ? (error as { status?: number }).status : undefined;
+  if (timedOut) attempt.outcome = "overall deadline exceeded";
+  else if (status === 415) attempt.outcome = "unsupported PDF content";
+  else if (status === 413) attempt.outcome = "response too large to read safely";
+  else if (status !== undefined) attempt.outcome = `HTTP ${status}`;
+  else if (attempt.outcome === "HTTP 200")
+    attempt.outcome = `content inspection failed: ${cleanText(safeError(error), 120) ?? "unknown error"}`;
+  if (retained) attempt.outcome += "; retained usable copy";
 }
 
 type Candidate = {
@@ -644,12 +575,65 @@ function needsRecovery(candidate: Candidate): boolean {
  * one advertised same-origin article representation. Keep the best usable copy
  * if recovery fails; never splice different versions of an article together.
  */
+export class WebFetchError extends Error {
+  readonly attempts: NonNullable<WebFetchResult["attempts"]>;
+  constructor(url: string, detail: string, attempts: WebFetchResult["attempts"] = []) {
+    const trail = formatAttemptTrail(attempts);
+    super(
+      repairText(
+        redactSecrets(`Could not read ${url}: ${detail}${trail ? ` (Attempts: ${trail})` : ""}`),
+      ),
+    );
+    this.name = "WebFetchError";
+    this.attempts = attempts;
+  }
+}
+
+function formatAttemptTrail(attempts: WebFetchResult["attempts"]): string {
+  return (attempts ?? [])
+    .map(
+      (attempt) =>
+        `${attempt.stage ?? attempt.source}@${attempt.endpoint ?? "Google"} ${elideMiddle(attempt.url, 256)}: ${attempt.outcome}`,
+    )
+    .join(" → ");
+}
+
 export async function executeAntigravityWebFetch(
   options: WebFetchOptions,
 ): Promise<WebFetchResult> {
+  return runWithDiagnostics(async () => {
+    const started = performance.now();
+    try {
+      const result = await fetchPage(options);
+      setLastFetchTrace(formatAttemptTrail(result.attempts));
+      if (result.assessment !== "readable" || result.partial !== false)
+        setLastError(
+          `Degraded fetch: assessment=${result.assessment ?? "unknown"}; partial=${result.partial}; ${result.attempts?.map((attempt) => `${attempt.stage ?? attempt.source}: ${attempt.outcome}`).join(" → ") ?? ""}`,
+        );
+      return result;
+    } catch (error) {
+      const checked = checkPublicUrl(options.url);
+      const safe =
+        error instanceof WebFetchError
+          ? error
+          : new WebFetchError(
+              checked.ok ? redactSecrets(checked.url) : "the supplied URL",
+              safeError(error),
+            );
+      setLastError(safe.message);
+      setLastFetchTrace(formatAttemptTrail(safe.attempts));
+
+      throw safe;
+    } finally {
+      setLastLatencyMs(Math.round(performance.now() - started));
+    }
+  });
+}
+
+async function fetchPage(options: WebFetchOptions): Promise<WebFetchResult> {
   const requestedUrl = validateFetchTarget(options.url);
   rejectPdfUrl(requestedUrl);
-  const deadline = AbortSignal.timeout(WEB_FETCH_TIMEOUT_MS);
+  const deadline = AbortSignal.timeout(options.timeoutMs ?? WEB_FETCH_TIMEOUT_MS);
   const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
   const creds = parseApiKey(options.apiKey);
   const headers = antigravityHeaders(creds.token);
@@ -657,6 +641,61 @@ export async function executeAntigravityWebFetch(
   const attempts: NonNullable<WebFetchResult["attempts"]> = [];
   let best: Candidate | undefined;
   let lastError = "no endpoint available";
+  let requests = 0;
+  let endpointAnswered: boolean;
+  let alternateTried = false;
+  const endpoints = endpointCandidates();
+  const unavailable = new Set<string>();
+  const requested = new Set<string>();
+  const request: typeof postJson = async (_endpoint, path, requestHeaders, body, requestSignal) => {
+    let attempt = attempts.at(-1);
+    if (path === REWRITE_URI_PATH) {
+      attempt = {
+        url: cleanText(redactSecrets(String(body.originalUri ?? "")), 2_048)!,
+        source: "cache",
+        stage: "redirect",
+        outcome: "transport failed",
+      };
+      attempts.push(attempt);
+    }
+    for (const endpoint of endpoints) {
+      if (unavailable.has(endpoint)) continue;
+      const key = JSON.stringify([endpoint, path, body]);
+      if (requested.has(key)) continue;
+      if (requests >= 10)
+        throw Object.assign(
+          new Error("The bounded fetch request budget was exhausted. Open the page in a browser."),
+          { fatal: true },
+        );
+      requested.add(key);
+      requests += 1;
+      if (attempt) attempt.endpoint = endpoint;
+      try {
+        const response = await postJson(endpoint, path, requestHeaders, body, requestSignal);
+        if (attempt) attempt.outcome = `HTTP ${response.status}`;
+        if (path === TRAWLER_FETCH_PATH) endpointAnswered = true;
+        return response;
+      } catch (error) {
+        if (
+          requestSignal?.aborted ||
+          (error instanceof Error && (error as { fatal?: boolean }).fatal)
+        )
+          throw error;
+        unavailable.add(endpoint);
+        if (attempt) {
+          // Preserve this failed endpoint, then keep the caller's live record at the
+          // end so later inspection updates the endpoint that actually answered.
+          const failed = { ...attempt, outcome: "transport failed" };
+          attempts.splice(attempts.length - 1, 0, failed);
+        }
+        lastError = capText(repairText(safeError(error)), 400);
+      }
+    }
+    if (attempt) attempts.pop(); // No physical request corresponds to the pending record.
+    throw Object.assign(new Error(`No Google endpoint could complete this request: ${lastError}`), {
+      fatal: true,
+    });
+  };
   const aborted = () => {
     if (options.signal?.aborted) throw new Error("Web fetch aborted");
   };
@@ -681,11 +720,14 @@ export async function executeAntigravityWebFetch(
       attempts,
     });
 
-  for (const endpoint of endpointCandidates()) {
+  // Per-request dispatch owns endpoint failover; never repeat the whole retrieval flow.
+  for (const endpoint of endpoints.slice(0, 1)) {
+    endpointAnswered = false;
     aborted();
     if (deadline.aborted) break;
     const resolvedUrl =
-      (await resolveRedirect(endpoint, requestedUrl, headers, signal)) ?? requestedUrl;
+      (await resolveRedirect(endpoint, requestedUrl, headers, signal, false, request)) ??
+      requestedUrl;
     aborted();
     rejectPdfUrl(resolvedUrl);
     let page: Candidate | undefined;
@@ -694,13 +736,15 @@ export async function executeAntigravityWebFetch(
       aborted();
       if (deadline.aborted) break;
       const attempt = {
-        url: redactSecrets(resolvedUrl),
+        url: cleanText(redactSecrets(resolvedUrl), 2_048)!,
+        endpoint,
+        stage: source,
         source,
         outcome: "transport failed",
       };
       attempts.push(attempt);
       try {
-        const response = await postJson(
+        const response = await request(
           endpoint,
           TRAWLER_FETCH_PATH,
           headers,
@@ -711,22 +755,17 @@ export async function executeAntigravityWebFetch(
         attempt.outcome = `HTTP ${response.status}`;
         if (response.status !== 200) {
           // The cache saying "not here" leaves the live fetch to try.
-          const cacheMiss =
-            source === "cache" &&
-            response.status >= 400 &&
-            response.status < 500 &&
-            response.status !== 401 &&
-            response.status !== 403 &&
-            response.status !== 429;
-          if (cacheMiss) continue;
+          if (statusAction(source, response.status) === "missing") continue;
           throw fetchError(response.text, response.status, source);
         }
         const contentType = parseTrawlerContentType(response.data);
         if (isPdfContentType(contentType)) throw pdfError();
         const content = parseTrawlerContent(response.data);
         if (content === undefined) {
-          lastError =
-            "Google returned no readable article content. The response may be truncated, blocked, or a page shell.";
+          attempt.outcome = "empty response";
+          lastError = /error|message/i.test(response.text)
+            ? capText(redactSecrets(jsonOrTextError(response.text)), 400)
+            : "Google returned no readable article content.";
           continue;
         }
         if (isPdfContent(content, contentType)) throw pdfError();
@@ -747,17 +786,16 @@ export async function executeAntigravityWebFetch(
         if (!needsRecovery(candidate)) return result(candidate);
       } catch (error) {
         aborted();
-        if (deadline.aborted) attempt.outcome = "overall deadline exceeded";
-        if (error instanceof Error && (error as { fatal?: boolean }).fatal) {
-          const status = (error as { status?: number }).status;
-          if (source === "cache" || !usable(best)) throw error;
-          if (status === 401 || status === 403)
-            attempt.outcome = `HTTP ${status}; retained usable copy`;
-          else if (status === 415)
-            attempt.outcome = "unsupported PDF content; retained usable copy";
-          else if (status === 413) attempt.outcome = "response too large to read safely";
-        }
-        lastError = safeError(error).slice(0, 400);
+        recordFailure(attempt, error, source !== "cache" && usable(best), deadline.aborted);
+        if (
+          error instanceof Error &&
+          (error as { fatal?: boolean }).fatal &&
+          (source === "cache" || !usable(best))
+        )
+          throw new WebFetchError(requestedUrl, safeError(error), attempts);
+        lastError = capText(repairText(safeError(error)), 400);
+        if (!endpointAnswered || (error instanceof Error && /convert safely/.test(error.message)))
+          break;
       }
     }
     // Raw mode means the requested page source, not a substituted representation.
@@ -767,25 +805,37 @@ export async function executeAntigravityWebFetch(
       ? (discovery?.inspection.alternates[0] ??
         (mdnUrl ? { url: mdnUrl, type: "application/json" as const } : undefined))
       : undefined;
-    if (alternate && discovery && !deadline.aborted) {
+    if (alternate && discovery && !deadline.aborted && !alternateTried) {
+      alternateTried = true;
       aborted();
+      let representationAttempt: NonNullable<WebFetchResult["attempts"]>[number] | undefined;
       try {
         const url = validateFetchTarget(alternate.url);
         rejectPdfUrl(url);
         // Resolve explicitly, so advertised links cannot redirect recovery to a different origin.
-        const redirected = await resolveRedirect(endpoint, url, headers, signal, true);
+        const redirected = await resolveRedirect(endpoint, url, headers, signal, true, request);
         aborted();
         if (deadline.aborted) break;
         if (redirected && new URL(redirected).origin !== new URL(resolvedUrl).origin) {
           attempts.push({
-            url: redactSecrets(url),
+            url: cleanText(redactSecrets(url), 2_048)!,
             source: "live",
+            endpoint,
+            stage: "representation",
             outcome: "cross-origin redirect rejected",
           });
         } else {
           const representationUrl = redirected ?? url;
+          representationAttempt = {
+            url: cleanText(redactSecrets(representationUrl), 2_048)!,
+            endpoint,
+            stage: "representation",
+            source: "live",
+            outcome: "transport failed",
+          };
+          attempts.push(representationAttempt);
           rejectPdfUrl(representationUrl);
-          const response = await postJson(
+          const response = await request(
             endpoint,
             TRAWLER_FETCH_PATH,
             headers,
@@ -793,11 +843,7 @@ export async function executeAntigravityWebFetch(
             signal,
           );
           aborted();
-          attempts.push({
-            url: redactSecrets(representationUrl),
-            source: "live",
-            outcome: `HTTP ${response.status}`,
-          });
+          representationAttempt.outcome = `HTTP ${response.status}`;
           if (response.status === 200) {
             const content = parseTrawlerContent(response.data);
             if (
@@ -809,21 +855,28 @@ export async function executeAntigravityWebFetch(
               content !== undefined && alternate.url === mdnUrl
                 ? inspectMdnRepresentation(content, resolvedUrl)
                 : undefined;
+            const reportedType = parseTrawlerContentType(response.data);
+            const jsonRepresentation =
+              mediaKind(reportedType) === "json" ||
+              (alternate.type === "application/json" && /^\s*[{[]/.test(content ?? ""));
             const body =
               mdn?.html ??
               (content === undefined
                 ? undefined
-                : alternate.type === "application/json"
+                : jsonRepresentation
                   ? articleRepresentation(content, resolvedUrl)
                   : content);
             if (body?.trim()) {
               const articleUrl = mdn?.resolvedUrl ?? resolvedUrl;
-              const alternateContentType =
-                alternate.type === "text/markdown" ? "text/markdown" : undefined;
+              // Decoded article fields are no longer the JSON response envelope.
+              const alternateContentType = mdn || jsonRepresentation ? undefined : reportedType;
               const inspection = inspectPage(body, articleUrl, alternateContentType);
               const representationLanguage =
                 inspection.metadata.language ?? mdn?.metadata.language ?? alternate.language;
-              if (mdn) inspection.completeness = mdn.completeness;
+              if (mdn) {
+                inspection.completeness = mdn.completeness;
+                inspection.notes = mdn.notes;
+              }
               inspection.metadata = {
                 ...discovery.inspection.metadata,
                 ...Object.fromEntries(
@@ -855,29 +908,32 @@ export async function executeAntigravityWebFetch(
               };
               retain(candidate);
               if (!needsRecovery(candidate)) return result(candidate);
+            } else {
+              representationAttempt.outcome = "no supported article body";
+              if (/error|message/i.test(content ?? ""))
+                lastError = capText(redactSecrets(jsonOrTextError(content!)), 400);
             }
-          } else if (response.status === 401 || response.status === 403) {
-            lastError = safeError(fetchError(response.text, response.status, "live")).slice(0, 400);
-            attempts[attempts.length - 1].outcome = `HTTP ${response.status}; retained usable copy`;
+          } else {
+            lastError = capText(
+              safeError(fetchError(response.text, response.status, "representation")),
+              400,
+            );
+            attempts[attempts.length - 1].outcome =
+              `HTTP ${response.status}${usable(best) ? "; retained usable copy" : ""}`;
           }
         }
       } catch (error) {
         aborted();
-        if (error instanceof Error && (error as { fatal?: boolean }).fatal) {
-          const status = (error as { status?: number }).status;
-          // An alternate representation is optional; keep a usable original on any failure.
-          if (!usable(best)) throw error;
-          if (status === 401 || status === 403) {
-            const attempt = attempts[attempts.length - 1];
-            if (attempt?.source === "live")
-              attempt.outcome = `HTTP ${status}; retained usable copy`;
-          }
-        }
-        lastError = safeError(error).slice(0, 400);
+        if (representationAttempt)
+          recordFailure(representationAttempt, error, usable(best), deadline.aborted);
+        if (error instanceof Error && (error as { fatal?: boolean }).fatal && !usable(best))
+          throw new WebFetchError(requestedUrl, safeError(error), attempts);
+        lastError = capText(repairText(safeError(error)), 400);
       }
     }
     // A useful partial result beats an error; recovery is bounded to this endpoint.
     if (best && usable(best)) return result(best);
+    if (endpointAnswered) break;
   }
   aborted();
   if (best && usable(best)) return result(best);
@@ -891,12 +947,7 @@ export async function executeAntigravityWebFetch(
   if (deadline.aborted)
     lastError =
       "The web fetch exceeded its overall 10-second deadline. Try again later or open the page in a browser.";
-  const stages = attempts.map((attempt) => `${attempt.source}: ${attempt.outcome}`).join("; ");
-  throw new Error(
-    redactSecrets(
-      `Antigravity web fetch failed: ${lastError}${stages ? ` (Attempts: ${stages})` : ""}`,
-    ),
-  );
+  throw new WebFetchError(requestedUrl, lastError, attempts);
 }
 
 /**
@@ -912,7 +963,7 @@ export function formatWebFetchResult(result: WebFetchResult, footer = ""): strin
   const available = maxChars - prefix.length - footer.length;
   if (available < 1)
     throw new Error(
-      "The character budget is too small for page provenance. Increase ANTIGRAVITY_WEB_FETCH_MAX_CHARS.",
+      "The character budget is too small for page provenance. Open the page in a browser or ask the user to increase ANTIGRAVITY_WEB_FETCH_MAX_CHARS.",
     );
   if (result.content.length <= available) return prefix + result.content + footer;
 

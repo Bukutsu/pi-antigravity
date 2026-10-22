@@ -3,6 +3,7 @@
  * Disable this extension resource in `pi config` to keep the Antigravity provider
  * and `/antigravity.fetch` without registering `read_url_content`.
  */
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { isExtraToolEnabled, redactSecrets } from "../utils/index.js";
@@ -16,7 +17,7 @@ import {
 } from "../web-fetch/index.js";
 import { createSnapshotStore } from "../web-fetch/snapshots.js";
 
-export default function (pi: ExtensionAPI): void {
+export default function (pi: Pick<ExtensionAPI, "on" | "registerTool">): void {
   if (!isExtraToolEnabled("FETCH")) return;
   const snapshots = createSnapshotStore();
   let generation = 0;
@@ -75,6 +76,7 @@ export default function (pi: ExtensionAPI): void {
         if (!params.snapshot && !apiKey) {
           throw new Error("No Antigravity credentials. Run /login antigravity first.");
         }
+        if (signal?.aborted) throw new Error("Web fetch aborted");
         onUpdate?.({
           content: [
             {
@@ -90,48 +92,79 @@ export default function (pi: ExtensionAPI): void {
           : await executeAntigravityWebFetch({ apiKey, url: url!, signal });
         if (signal?.aborted) throw new Error("Web fetch aborted");
         if (started !== generation) throw new Error("Session changed during web fetch.");
-        const snapshot = params.snapshot ?? snapshots.put(result);
-        const captured = { ...result, maxChars };
+        const snapshot = params.snapshot ?? (result.fullContent ? randomUUID() : undefined);
+        const attempts: Array<{
+          source: string;
+          outcome: string;
+          url?: string;
+          stage?: string;
+          endpoint?: string;
+        }> = [...(result.attempts ?? [])];
+        const details = {
+          source: result.source,
+          bytes: result.bytes,
+          truncated: false,
+          partial: result.partial,
+          assessment: result.assessment,
+          representationUrl: result.representationUrl
+            ? redactSecrets(result.representationUrl)
+            : undefined,
+          attempts,
+          omittedAttempts: 0,
+          snapshot,
+          // Reserve the largest cursor before formatting; the real cursor only shrinks it.
+          nextOffset: snapshot ? result.fullContent!.length : undefined,
+        };
+        const detailsBudget = Math.floor(maxChars * 0.4);
+        const size = () => JSON.stringify(details).length;
+        while (size() > detailsBudget && details.attempts.length > 1) {
+          details.attempts.shift();
+          details.omittedAttempts += 1;
+        }
+        if (size() > detailsBudget && details.attempts.length === 1) {
+          const last = details.attempts[0];
+          details.attempts = [{ source: last.source, stage: last.stage, outcome: last.outcome }];
+        }
+        if (size() > detailsBudget) details.representationUrl = undefined;
+        if (size() > detailsBudget && details.attempts.length) {
+          details.attempts = [];
+          details.omittedAttempts += 1;
+        }
+        const textBudget = maxChars - size();
+        const captured = { ...result, maxChars: textBudget };
         let page: ReturnType<typeof readCapturedPage> | undefined;
         let continuation = "";
         if (snapshot) {
-          let budget = Math.max(1, maxChars - formatWebFetchHeader(captured).length);
+          let budget = Math.max(1, textBudget - formatWebFetchHeader(captured).length);
           for (;;) {
             page = readCapturedPage(captured, params.offset ?? 0, budget);
             continuation =
               `\n\nSnapshot: ${snapshot}\nRange: ${page.offset}–${page.nextOffset ?? page.totalChars} of ${page.totalChars} characters.` +
               (page.nextOffset !== undefined
-                ? `\nContinue with snapshot="${snapshot}", offset=${page.nextOffset}.`
+                ? `\nNext offset: ${page.nextOffset} (use the same snapshot).`
                 : "\nEnd of captured content (not proof of full article coverage).");
             const excess =
               formatWebFetchHeader(page.result).length +
               page.result.content.length +
               continuation.length -
-              maxChars;
+              textBudget;
             if (excess <= 0) break;
             budget -= excess;
             if (budget < 1)
               throw new Error(
-                "The character budget is too small for page provenance or a code-fence delimiter. Increase ANTIGRAVITY_WEB_FETCH_MAX_CHARS.",
+                "The character budget is too small for page provenance or a code-fence delimiter. Open the page in a browser or ask the user to increase ANTIGRAVITY_WEB_FETCH_MAX_CHARS.",
               );
           }
         }
         const displayed = page?.result ?? captured;
+        const text = formatWebFetchResult(displayed, continuation);
+        details.truncated = displayed.truncated;
+        details.nextOffset = page?.nextOffset;
+        // Commit a new capture only after the complete output has been formatted.
+        if (!params.snapshot && snapshot) snapshots.put(result, snapshot);
         return {
-          content: [{ type: "text", text: formatWebFetchResult(displayed, continuation) }],
-          details: {
-            source: displayed.source,
-            bytes: displayed.bytes,
-            truncated: displayed.truncated,
-            partial: displayed.partial,
-            assessment: displayed.assessment,
-            representationUrl: displayed.representationUrl
-              ? redactSecrets(displayed.representationUrl)
-              : undefined,
-            attempts: displayed.attempts,
-            snapshot,
-            nextOffset: page?.nextOffset,
-          },
+          content: [{ type: "text", text }],
+          details,
         };
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
