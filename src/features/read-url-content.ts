@@ -8,9 +8,11 @@ import { Type } from "@earendil-works/pi-ai";
 import { isExtraToolEnabled, redactSecrets } from "../utils/index.js";
 import {
   executeAntigravityWebFetch,
+  formatWebFetchHeader,
   formatWebFetchResult,
   readCapturedPage,
   resolveMaxChars,
+  validateFetchTarget,
 } from "../web-fetch/index.js";
 import { createSnapshotStore } from "../web-fetch/snapshots.js";
 
@@ -64,48 +66,68 @@ export default function (pi: ExtensionAPI): void {
         throw new Error("Offset requires a snapshot.");
       if (signal?.aborted) throw new Error("Web fetch aborted");
       const started = generation;
-      const apiKey = params.snapshot
-        ? undefined
-        : await ctx.modelRegistry.getApiKeyForProvider("antigravity");
-      if (!params.snapshot && !apiKey) {
-        throw new Error("No Antigravity credentials. Run /login antigravity first.");
-      }
-      onUpdate?.({
-        content: [
-          {
-            type: "text",
-            text: params.snapshot ? "Reading captured page…" : `Reading ${params.url}…`,
-          },
-        ],
-        details: {},
-      });
+      const maxChars = resolveMaxChars();
       try {
+        const url = params.url ? validateFetchTarget(params.url) : undefined;
+        const apiKey = params.snapshot
+          ? undefined
+          : await ctx.modelRegistry.getApiKeyForProvider("antigravity");
+        if (!params.snapshot && !apiKey) {
+          throw new Error("No Antigravity credentials. Run /login antigravity first.");
+        }
+        onUpdate?.({
+          content: [
+            {
+              type: "text",
+              text: params.snapshot ? "Reading captured page…" : `Reading ${redactSecrets(url!)}…`,
+            },
+          ],
+          details: {},
+        });
         if (started !== generation) throw new Error("Session changed during web fetch.");
         const result = params.snapshot
           ? snapshots.get(params.snapshot)
-          : await executeAntigravityWebFetch({ apiKey, url: params.url!, signal });
+          : await executeAntigravityWebFetch({ apiKey, url: url!, signal });
         if (signal?.aborted) throw new Error("Web fetch aborted");
         if (started !== generation) throw new Error("Session changed during web fetch.");
         const snapshot = params.snapshot ?? snapshots.put(result);
-        const page = snapshot
-          ? readCapturedPage(result, params.offset ?? 0, resolveMaxChars())
-          : undefined;
-        const displayed = page?.result ?? result;
-        const continuation = page
-          ? `\n\nSnapshot: ${snapshot}\nRange: ${page.offset}–${page.nextOffset ?? page.totalChars} of ${page.totalChars} characters.` +
-            (page.nextOffset !== undefined
-              ? `\nContinue with snapshot="${snapshot}", offset=${page.nextOffset}.`
-              : "\nEnd of captured content (not proof of full article coverage).")
-          : "";
+        const captured = { ...result, maxChars };
+        let page: ReturnType<typeof readCapturedPage> | undefined;
+        let continuation = "";
+        if (snapshot) {
+          let budget = Math.max(1, maxChars - formatWebFetchHeader(captured).length);
+          for (;;) {
+            page = readCapturedPage(captured, params.offset ?? 0, budget);
+            continuation =
+              `\n\nSnapshot: ${snapshot}\nRange: ${page.offset}–${page.nextOffset ?? page.totalChars} of ${page.totalChars} characters.` +
+              (page.nextOffset !== undefined
+                ? `\nContinue with snapshot="${snapshot}", offset=${page.nextOffset}.`
+                : "\nEnd of captured content (not proof of full article coverage).");
+            const excess =
+              formatWebFetchHeader(page.result).length +
+              page.result.content.length +
+              continuation.length -
+              maxChars;
+            if (excess <= 0) break;
+            budget -= excess;
+            if (budget < 1)
+              throw new Error(
+                "The character budget is too small for page provenance or a code-fence delimiter. Increase ANTIGRAVITY_WEB_FETCH_MAX_CHARS.",
+              );
+          }
+        }
+        const displayed = page?.result ?? captured;
         return {
-          content: [{ type: "text", text: formatWebFetchResult(displayed) + continuation }],
+          content: [{ type: "text", text: formatWebFetchResult(displayed, continuation) }],
           details: {
             source: displayed.source,
             bytes: displayed.bytes,
             truncated: displayed.truncated,
             partial: displayed.partial,
             assessment: displayed.assessment,
-            representationUrl: displayed.representationUrl,
+            representationUrl: displayed.representationUrl
+              ? redactSecrets(displayed.representationUrl)
+              : undefined,
             attempts: displayed.attempts,
             snapshot,
             nextOffset: page?.nextOffset,
@@ -113,7 +135,10 @@ export default function (pi: ExtensionAPI): void {
         };
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        throw new Error(redactSecrets(msg), { cause: error });
+        // Error causes can retain request objects and response text; keep only a redacted message.
+        const safe = redactSecrets(msg);
+        // eslint-disable-next-line preserve-caught-error -- the raw cause can retain request/response bodies
+        throw new Error(safe, { cause: new Error(safe) });
       }
     },
   });

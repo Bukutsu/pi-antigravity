@@ -5,6 +5,7 @@ import {
   extractPageMetadata,
   htmlToMarkdown,
   looksLikeHtml,
+  sanitizeMetadataText,
 } from "./markdown.js";
 
 export type ContentAssessment = "readable" | "empty" | "suspected-shell" | "suspected-access-wall";
@@ -18,8 +19,83 @@ export type PageInspection = {
     published?: string;
     language?: string;
   };
-  alternates: Array<{ url: string; type: "text/markdown" | "application/json" }>;
+  alternates: Array<{
+    url: string;
+    type: "text/markdown" | "application/json";
+    language?: string;
+  }>;
 };
+
+function normalizedWallHeading(value: string): string {
+  return value
+    .replace(/\s*[|•–—-]\s*cloudflare\s*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Headings that are a wall on their own. They stay exact: "429 Too Many Requests"
+ * is also the title of a real article about that status, and "Forbidden error
+ * handling" is a real article title.
+ */
+const ACCESS_WALL_HEADINGS = [
+  "forbidden",
+  "403 forbidden",
+  "unauthorized",
+  "401 unauthorized",
+  "access denied",
+];
+
+/**
+ * Openings of the interstitials that stand in for an article. The heading of a real
+ * wall usually carries more than the phrase itself ("Please enable JavaScript to
+ * continue"), so a phrase that opens the heading marks a wall.
+ */
+const ACCESS_WALL_OPENINGS = [
+  "just a moment",
+  "verify you are human",
+  "verifying you are human",
+  "attention required",
+  "you have been blocked",
+  "sorry, you have been blocked",
+  "checking your browser",
+  "security check",
+  "enable javascript",
+  "please enable javascript",
+  "javascript is required",
+  "javascript required",
+  "are you a robot",
+  "unusual traffic",
+  "request blocked",
+  "rate limited",
+  "you are being rate limited",
+];
+
+/** Sign-in pages read like a wall, but an article title may also start with one. */
+const ACCESS_WALL_SIGN_IN_OPENINGS = ["sign in", "log in"];
+
+/** How much text may follow the wall phrase before the heading is an article title. */
+const ACCESS_WALL_TAIL = 40;
+const ACCESS_WALL_SIGN_IN_TAIL = 24;
+
+/** A short block/sign-in heading, not an article that happens to discuss one. */
+function isAccessWallHeading(value: string | undefined): boolean {
+  if (!value) return false;
+  const text = normalizedWallHeading(value).toLowerCase();
+  if (!text) return false;
+  if (ACCESS_WALL_HEADINGS.includes(text.replace(/[.!…\s]*$/, ""))) return true;
+  const opens = (opening: string, tail: number) =>
+    text.startsWith(opening) && text.length - opening.length <= tail;
+  return (
+    ACCESS_WALL_OPENINGS.some((opening) => opens(opening, ACCESS_WALL_TAIL)) ||
+    ACCESS_WALL_SIGN_IN_OPENINGS.some((opening) => opens(opening, ACCESS_WALL_SIGN_IN_TAIL))
+  );
+}
+
+function isLoadingShell(rendered: string): boolean {
+  const visible = rendered.replace(/^#{1,6} .*$/gm, "").trim();
+  return /^(?:loading|please wait|redirecting|initializing)[.!…\s]*$/i.test(visible);
+}
 
 /** Match structured data to this page without treating fragments as separate pages. */
 function pageIdentity(value: unknown, baseUrl: string): string | undefined {
@@ -35,8 +111,8 @@ function pageIdentity(value: unknown, baseUrl: string): string | undefined {
 }
 
 /** Inspect data before destructive Markdown cleanup; never execute page scripts. */
-export function inspectPage(content: string, url: string): PageInspection {
-  if (!looksLikeHtml(content)) {
+export function inspectPage(content: string, url: string, contentType?: string): PageInspection {
+  if (!looksLikeHtml(content, contentType)) {
     const rendered = content.trim();
     let title: string | undefined;
     let fence: string | undefined;
@@ -59,13 +135,13 @@ export function inspectPage(content: string, url: string): PageInspection {
       rendered,
       completeness: "unknown",
       assessment: rendered ? "readable" : "empty",
-      metadata: { title },
+      metadata: { title: sanitizeMetadataText(title, 300) },
       alternates: [],
     };
   }
   const document = createDocument(content);
   const metadata: PageInspection["metadata"] = extractPageMetadata(content);
-  metadata.language = document.documentElement.lang || undefined;
+  metadata.language = sanitizeMetadataText(document.documentElement.lang || undefined, 50);
   const nodes: Record<string, unknown>[] = [];
   let budget = 256_000;
   for (const script of Array.from(
@@ -98,7 +174,7 @@ export function inspectPage(content: string, url: string): PageInspection {
   });
   if (article) {
     const text = (value: unknown) =>
-      typeof value === "string" && value.trim() ? value.trim().slice(0, 4000) : undefined;
+      typeof value === "string" && value.trim() ? sanitizeMetadataText(value, 1000) : undefined;
     metadata.title ??= text(article.headline);
     metadata.description ??= text(article.description);
     metadata.updated ??= text(article.dateModified);
@@ -106,7 +182,7 @@ export function inspectPage(content: string, url: string): PageInspection {
     metadata.language ??= text(article.inLanguage);
     const author: unknown = Array.isArray(article.author) ? article.author[0] : article.author;
     const person: unknown =
-      isRecord(author) && !author.name
+      isRecord(author) && !author.name && typeof author["@id"] === "string"
         ? nodes.find((node) => node["@id"] === author["@id"])
         : author;
     metadata.author = isRecord(person) ? text(person.name) : text(person);
@@ -122,37 +198,52 @@ export function inspectPage(content: string, url: string): PageInspection {
       const alternate = new URL(link.getAttribute("href")!, url);
       if (alternate.origin !== new URL(url).origin || alternate.username || alternate.password)
         continue;
+      if (/\.pdf$/i.test(alternate.pathname)) continue;
       alternate.hash = "";
       if (alternate.href === identity || alternates.some((item) => item.url === alternate.href))
         continue;
-      alternates.push({ url: alternate.href, type });
+      const language = sanitizeMetadataText(
+        link.getAttribute("hreflang") ?? undefined,
+        35,
+      )?.toLowerCase();
+      const declaredLanguage = language && language !== "x-default" ? language : undefined;
+      alternates.push({
+        url: alternate.href,
+        type,
+        ...(declaredLanguage ? { language: declaredLanguage } : {}),
+      });
     } catch {
       // Ignore invalid URLs, including malformed base-relative references.
     }
   }
-  alternates.sort(
-    (a, b) => Number(b.type === "text/markdown") - Number(a.type === "text/markdown"),
-  );
+  const pageLanguage = metadata.language?.split("-")[0].toLowerCase();
+  const sameLanguage = pageLanguage
+    ? alternates.filter((item) => !item.language || item.language.split("-")[0] === pageLanguage)
+    : alternates;
+  const preferred = sameLanguage.length ? sameLanguage : alternates;
+  preferred.sort((a, b) => Number(b.type === "text/markdown") - Number(a.type === "text/markdown"));
   const rendered = htmlToMarkdown(content, { baseUrl: url });
   const heading = document.querySelector("h1")?.textContent?.trim() || metadata.title || "";
-  const scriptShell = Boolean(document.querySelector('script[type="module"][src]'));
+  // A page that loads an application script and shows nothing else is a shell.
+  const completeness = classifyCopyCompleteness(content);
+  // A page that loads application JavaScript and shows only a placeholder is a shell.
+  const appScript = Boolean(document.querySelector('script[src], script[type="module"]'));
   const assessment: ContentAssessment = !rendered.trim()
-    ? scriptShell
+    ? // A copy that ends before the content is cut off, not an application shell.
+      appScript && completeness !== "incomplete"
       ? "suspected-shell"
       : "empty"
-    : /^(access denied|just a moment|sign in|log in|verify you are human|attention required)[.!…\s]*$/i.test(
-          heading,
-        )
+    : isAccessWallHeading(heading) || isAccessWallHeading(metadata.title)
       ? "suspected-access-wall"
-      : !rendered.replace(/^#{1,6} .*$/gm, "").trim()
+      : (appScript && isLoadingShell(rendered)) || !rendered.replace(/^#{1,6} .*$/gm, "").trim()
         ? "suspected-shell"
         : "readable";
   return {
     rendered,
-    completeness: classifyCopyCompleteness(content),
+    completeness,
     assessment,
     metadata,
-    alternates: alternates.slice(0, 8),
+    alternates: preferred.slice(0, 8),
   };
 }
 

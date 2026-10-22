@@ -40,20 +40,49 @@ export function assertSafeApiBaseUrl(raw: string): string {
   return `${url.origin}${path === "/" ? "" : path}`;
 }
 
+/**
+ * Query parameter names whose values carry credentials. A fragment carries the same
+ * kind of value as a query string, so `#access_token=...` is covered too.
+ */
+const SECRET_QUERY_NAME =
+  /^(?:access_token|refresh_token|id_token|token|client_secret|code_verifier|code|authorization|api[_-]?key|key|secret|password|passwd|signature|sig|credential|oauth_token|oauth_signature|oauth_consumer_key|auth|jwt|session|sid|awsaccesskeyid|state|nonce|x-amz-credential|x-amz-signature|x-amz-security-token|x-goog-credential|x-goog-signature)$/i;
+
+/**
+ * Redact URL userinfo and sensitive query values embedded in text. This is one layer
+ * of {@link redactSecrets}: model-facing text must go through the stronger redactor.
+ */
+function redactUrlSecrets(text: string): string {
+  return text
+    .replace(/\b(https?:\/\/)[^/?#\s]*@/gi, "$1[redacted]@")
+    .replace(/([?&#])([^=&#\s]+)=([^&#\s]*)/g, (match, separator: string, name: string) => {
+      let decoded: string;
+      try {
+        decoded = decodeURIComponent(name.replace(/\+/g, " "));
+      } catch {
+        return match;
+      }
+      return SECRET_QUERY_NAME.test(decoded) ? `${separator}${name}=[redacted]` : match;
+    });
+}
+
+/**
+ * Credential names redacted from free-form diagnostics. `code` is deliberately absent:
+ * it is far too common in prose ("exit code=1"), and URLs are covered by the URL
+ * layer, which does redact `?code=`.
+ */
+const SECRET_ASSIGNMENT_NAME =
+  /"?(?:access_token|refresh_token|id_token|token|client_secret|code_verifier|authorization|password|passwd|secret|api[_-]?key|signature|sig|oauth_token|oauth_signature|oauth_consumer_key|auth|jwt|session|sid|awsaccesskeyid|state|nonce)"?\s*[:=]\s*/gi;
+
 /** Redact bearer tokens, refresh tokens, and similar secrets from diagnostics/errors. */
 export function redactSecrets(text: string): string {
-  return text
-    .replace(/\bya29\.[A-Za-z0-9._~+/-]+=*/g, "[redacted-access-token]")
-    .replace(/\b1\/[A-Za-z0-9_-]{20,}/g, "[redacted-refresh-token]")
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [redacted]")
-    .replace(
-      /("?(?:access_token|refresh_token|id_token|token|client_secret|code_verifier|authorization)"?\s*[:=]\s*")[^"]*(")/gi,
-      "$1[redacted]$2",
-    )
-    .replace(
-      /("?(?:access_token|refresh_token|id_token|token|client_secret|code_verifier|authorization)"?\s*[:=]\s*)[^\s&,}]+/gi,
-      "$1[redacted]",
-    );
+  return redactUrlSecrets(
+    text
+      .replace(/\bya29\.[A-Za-z0-9._~+/-]+=*/g, "[redacted-access-token]")
+      .replace(/\b1\/[A-Za-z0-9_-]{20,}/g, "[redacted-refresh-token]")
+      .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [redacted]")
+      .replace(new RegExp(`(${SECRET_ASSIGNMENT_NAME.source}")[^"]*(")`, "gi"), "$1[redacted]$2")
+      .replace(new RegExp(`(${SECRET_ASSIGNMENT_NAME.source})[^\\s&,}]+`, "gi"), "$1[redacted]"),
+  );
 }
 
 const VALIDATION_URL_HOST = "accounts.google.com";

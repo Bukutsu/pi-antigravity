@@ -52,30 +52,112 @@ export type PageMetadata = {
   updated?: string;
 };
 
+/** Collapse line breaks/control characters and bound page-controlled metadata. */
+export function sanitizeMetadataText(value: string | undefined, limit: number): string | undefined {
+  if (!value) return undefined;
+  const cleaned = value
+    .replace(/[\p{Cc}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return undefined;
+  if (cleaned.length <= limit) return cleaned;
+  let end = Math.max(0, limit - 1);
+  if (/[\uD800-\uDBFF]/.test(cleaned[end - 1] ?? "") && /[\uDC00-\uDFFF]/.test(cleaned[end] ?? ""))
+    end -= 1;
+  return `${cleaned.slice(0, end)}…`;
+}
+
 /** Read metadata through the HTML parser, not a search through attribute text. */
 export function extractPageMetadata(html: string): PageMetadata {
   const document = createDocument(html);
   const meta = (selector: string) =>
     document.querySelector(selector)?.getAttribute("content")?.trim() || undefined;
   return {
-    title:
+    title: sanitizeMetadataText(
       meta('meta[property="og:title"]') ??
-      meta('meta[name="twitter:title"]') ??
-      (document.querySelector("title")?.textContent?.trim() || undefined),
-    description:
+        meta('meta[name="twitter:title"]') ??
+        (document.querySelector("title")?.textContent?.trim() || undefined),
+      300,
+    ),
+    description: sanitizeMetadataText(
       meta('meta[property="og:description"]') ??
-      meta('meta[name="description"]') ??
-      meta('meta[name="twitter:description"]'),
-    updated:
+        meta('meta[name="description"]') ??
+        meta('meta[name="twitter:description"]'),
+      1000,
+    ),
+    updated: sanitizeMetadataText(
       meta('meta[property="article:modified_time"]') ??
-      meta('meta[property="og:updated_time"]') ??
-      meta('meta[name="last-modified"]') ??
-      meta('meta[name="lastmod"]'),
+        meta('meta[property="og:updated_time"]') ??
+        meta('meta[name="last-modified"]') ??
+        meta('meta[name="lastmod"]'),
+      100,
+    ),
   };
 }
 
+/** Any element name, block-level or inline. */
+const HTML_TAG = /<\/?([a-z][a-z0-9:-]*)\b[^>]*>/gi;
+
+/** Elements that never carry a closing tag. */
+const HTML_VOID_TAGS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+]);
+
+/**
+ * Whether an element's closing tag ends a markup run. Text after the closing tag
+ * belongs to the sentence around it ("closed by </p>."), not to the markup.
+ */
+function closesLikeMarkup(source: string, name: string): boolean {
+  const pattern = new RegExp(`</${name}\\s*>`, "gi");
+  for (let match = pattern.exec(source); match; match = pattern.exec(source)) {
+    const rest = source.slice(match.index + match[0].length);
+    const nextMarkup = rest.indexOf("<");
+    const tail = nextMarkup < 0 ? rest : rest.slice(0, nextMarkup);
+    if (!tail.trim()) return true;
+  }
+  return false;
+}
+
+/** Require document markers or element structure, not a prose mention of a tag. */
+function hasHtmlStructure(source: string): boolean {
+  if (!source.trimStart().startsWith("<")) return false;
+  if (/<!doctype\b[^<>]*>|<\/?(?:html|head|body)\b/i.test(source)) return true;
+  const names = new Set<string>();
+  for (const match of source.matchAll(HTML_TAG)) {
+    const name = match[1]?.toLowerCase();
+    if (name) names.add(name);
+  }
+  for (const name of names) {
+    if (HTML_VOID_TAGS.has(name)) return true;
+    if (!new RegExp(`<${name}\\b[^>]*>`, "i").test(source)) continue;
+    if (closesLikeMarkup(source, name)) return true;
+  }
+  return false;
+}
+
 /** Leave plain text, JSON, and already-Markdown responses alone. */
-export function looksLikeHtml(text: string): boolean {
+export function looksLikeHtml(text: string, contentType?: string): boolean {
+  const mediaType = contentType?.split(";")[0].trim().toLowerCase();
+  if (
+    mediaType === "text/plain" ||
+    mediaType === "application/json" ||
+    mediaType === "text/markdown"
+  )
+    return false;
+  if (mediaType === "text/html" || mediaType === "application/xhtml+xml") return true;
   if (/^\s*[{"[]/.test(text)) {
     try {
       JSON.parse(text);
@@ -111,9 +193,7 @@ export function looksLikeHtml(text: string): boolean {
     )
       return false;
   }
-  return /<!doctype\b[^<>]*>|<\/?(?:a|address|article|aside|audio|b|blockquote|body|br|button|canvas|caption|code|dd|details|div|dl|dt|em|fieldset|figcaption|figure|footer|form|h[1-6]|head|header|hr|html|i|iframe|img|input|label|legend|li|link|main|meta|nav|ol|option|p|pre|section|select|small|source|span|strong|style|sub|summary|sup|table|tbody|td|textarea|tfoot|th|thead|time|title|tr|u|ul|video)\b[^<>]*>/i.test(
-    source,
-  );
+  return hasHtmlStructure(source);
 }
 
 /** Find a tag's closing angle bracket without mistaking a quoted attribute for markup. */
@@ -218,7 +298,7 @@ export function classifyCopyCompleteness(html: string): CopyCompleteness {
     index = tagEnd + 1;
   }
 
-  if (rootClosedAtEnd) return "complete";
+  if (rootClosedAtEnd && contentDepth === 0) return "complete";
   return documentRootSeen && contentDepth > 0 ? "incomplete" : "unknown";
 }
 
@@ -240,24 +320,29 @@ function resolveTarget(target: string, baseUrl?: string): string {
   }
 }
 
-/** Whether an inline style explicitly hides its element. */
+/** Whether the effective inline style hides its element. */
 function isHiddenStyle(style: string | null): boolean {
-  return (
-    style?.split(";").some((declaration) => {
-      const separator = declaration.indexOf(":");
-      if (separator < 0) return false;
-      const property = declaration.slice(0, separator).trim().toLowerCase();
-      const value = declaration
-        .slice(separator + 1)
-        .replace(/\s*!important\s*$/i, "")
-        .trim()
-        .toLowerCase();
-      return (
-        (property === "display" && value === "none") ||
-        (property === "visibility" && (value === "hidden" || value === "collapse"))
-      );
-    }) ?? false
-  );
+  if (!style) return false;
+  // A comment inside the attribute must not hide the declaration behind it.
+  const declarations = style.replace(/\/\*[\s\S]*?\*\//g, "").split(";");
+  const winners = new Map<string, { value: string; important: boolean }>();
+  for (const declaration of declarations) {
+    const separator = declaration.indexOf(":");
+    if (separator < 0) continue;
+    const property = declaration.slice(0, separator).trim().toLowerCase();
+    if (property !== "display" && property !== "visibility") continue;
+    const raw = declaration.slice(separator + 1);
+    const important = /!\s*important\s*$/i.test(raw);
+    const value = raw
+      .replace(/\s*!\s*important\s*$/i, "")
+      .trim()
+      .toLowerCase();
+    const current = winners.get(property);
+    if (!current || important || !current.important) winners.set(property, { value, important });
+  }
+  const display = winners.get("display")?.value;
+  const visibility = winners.get("visibility")?.value;
+  return display === "none" || visibility === "hidden" || visibility === "collapse";
 }
 
 /** Remove only a dangling tag fragment at the end of a partial page. */

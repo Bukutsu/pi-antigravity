@@ -357,9 +357,11 @@ function hostnameOf(url: string): string {
  */
 export function isPrivateAddress(address: string): boolean {
   const bare = address.startsWith("[") && address.endsWith("]") ? address.slice(1, -1) : address;
-  const version = isIP(bare);
+  // A zone identifier (`fe80::1%eth0`) is scoped to a local interface.
+  const addressOnly = bare.split("%")[0];
+  const version = isIP(addressOnly);
   if (version === 4) {
-    const [a = 0, b = 0] = bare.split(".").map(Number);
+    const [a = 0, b = 0] = addressOnly.split(".").map(Number);
     if (a === 0 || a === 10 || a === 127) return true;
     if (a === 100 && b >= 64 && b <= 127) return true; // carrier-grade NAT
     if (a === 169 && b === 254) return true; // link-local, and the metadata endpoint
@@ -369,20 +371,56 @@ export function isPrivateAddress(address: string): boolean {
     return a >= 224; // multicast, then reserved
   }
   if (version === 6) {
-    const lowered = new URL(`http://[${bare}]/`).hostname.slice(1, -1);
+    let lowered: string;
+    try {
+      lowered = new URL(`http://[${addressOnly}]/`).hostname.slice(1, -1);
+    } catch {
+      return true; // fail closed if an IPv6 literal cannot be canonicalized
+    }
     if (lowered === "::" || lowered === "::1") return true;
     if (/^f[cd]/.test(lowered)) return true; // unique local
     if (/^fe[89ab]/.test(lowered)) return true; // link-local
+    if (/^fe[c-f]/.test(lowered)) return true; // site-local
+    if (/^ff/.test(lowered)) return true; // multicast
     // URL canonicalization renders mapped IPv4 addresses as two hexadecimal words.
     const mapped = /^::ffff:([0-9a-f]+):([0-9a-f]+)$/.exec(lowered);
-    if (!mapped) return false;
-    const octets = mapped.slice(1).flatMap((word) => {
-      const value = parseInt(word, 16);
-      return [value >> 8, value & 255];
-    });
-    return isPrivateAddress(octets.join("."));
+    const translated = /^::ffff:0:([0-9a-f]+):([0-9a-f]+)$/.exec(lowered);
+    const embedded = mapped ?? translated;
+    if (embedded) {
+      const octets = embedded.slice(1).flatMap((word) => {
+        const value = parseInt(word, 16);
+        return [value >> 8, value & 255];
+      });
+      return isPrivateAddress(octets.join("."));
+    }
+    const words = ipv6Words(lowered);
+    if (!words) return true;
+    if (words[0] === 0x64 && words[1] === 0xff9b && words.slice(2, 6).every((word) => word === 0))
+      return true; // NAT64
+    if (words[0] === 0x2002) return true; // 6to4
+    if (words[0] === 0x100 && words.slice(1, 4).every((word) => word === 0)) return true; // discard
+    if (words[0] === 0x2001 && words[1] === 0x0db8) return true; // documentation
+    // IPv4-compatible/deprecated addresses still embed a local IPv4 target.
+    if (/^::/.test(lowered)) return true;
+    return false;
   }
   return false;
+}
+
+/** Expand a canonical IPv6 literal into eight 16-bit words. */
+function ipv6Words(address: string): number[] | undefined {
+  const halves = address.split("::");
+  if (halves.length > 2) return undefined;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - left.length - right.length;
+  if (missing < 0 || (halves.length === 1 && missing !== 0)) return undefined;
+  const words = [...left, ...Array<string>(missing).fill("0"), ...right].map((word) =>
+    Number.parseInt(word, 16),
+  );
+  return words.every((word) => Number.isInteger(word) && word >= 0 && word <= 0xffff)
+    ? words
+    : undefined;
 }
 
 /**

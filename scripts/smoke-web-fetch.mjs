@@ -72,7 +72,7 @@ try {
       assert.ok([true, false, null].includes(details.partial), "Invalid completeness state");
       assert.match(text, /Source: https?:\/\//, "Missing source URL");
       if (details.assessment === "suspected-shell") assert.match(text, /Note:.*JavaScript-rendered/, "Missing shell explanation");
-      else if (details.partial !== false) assert.match(text, /Note:.*(?:ends mid-page|completeness is unknown)/, "Missing completeness warning");
+      else if (details.partial !== false) assert.match(text, /Note:.*(?:ends mid-page|no clear end marker|completeness is unknown)/, "Missing completeness warning");
       const canonicalObserved = !canonical || text.includes("Source: " + canonical + " ");
       if (canonical && canonicalObserved) {
         assert.ok(text.includes("Requested: " + url), "Missing MDN redirect provenance");
@@ -83,19 +83,25 @@ try {
       if (details.nextOffset !== undefined) {
         assert.ok(details.snapshot && Number.isSafeInteger(details.nextOffset) && details.nextOffset > 0, "Invalid continuation");
         const before = { requests, credentialReads };
-        const next = await tool.execute(label + "-next", { snapshot: details.snapshot, offset: details.nextOffset }, AbortSignal.timeout(5_000), undefined, context);
-        assert.equal(requests, before.requests, "Snapshot continuation made a network request");
-        assert.equal(credentialReads, before.credentialReads, "Snapshot continuation consulted credentials");
-        assert.equal(next.details.snapshot, details.snapshot, "Snapshot identity changed");
-        assert.ok(next.details.nextOffset === undefined || next.details.nextOffset > details.nextOffset, "Continuation did not advance");
-        assert.ok(textOf(next).includes(`Range: ${details.nextOffset}–`), "Continuation starts at wrong offset");
-        available += "\n" + pageText(next);
-        continuationChecked = true;
+        let offset = details.nextOffset;
+        for (let range = 0; offset !== undefined && range < 8; range += 1) {
+          const next = await tool.execute(label + "-next", { snapshot: details.snapshot, offset }, AbortSignal.timeout(5_000), undefined, context);
+          assert.equal(requests, before.requests, "Snapshot continuation made a network request");
+          assert.equal(credentialReads, before.credentialReads, "Snapshot continuation consulted credentials");
+          assert.equal(next.details.snapshot, details.snapshot, "Snapshot identity changed");
+          assert.ok(next.details.nextOffset === undefined || next.details.nextOffset > offset, "Continuation did not advance");
+          assert.ok(textOf(next).includes(`Range: ${offset}–`), "Continuation starts at wrong offset");
+          available += pageText(next);
+          continuationChecked = true;
+          offset = next.details.nextOffset;
+          if (available.toLowerCase().includes(expected.toLowerCase())) break;
+        }
       }
       const found = available.toLowerCase().includes(expected.toLowerCase());
-      const status = found && details.assessment === "readable" && canonicalObserved ? "pass" : "warn";
+      // Missing stable page markers fail. The resolver may not reveal the MDN canonical alias.
+      const status = !found || details.assessment !== "readable" ? "fail" : canonicalObserved ? "pass" : "warn";
       counts[status] += 1;
-      console.log(`${status.toUpperCase()} ${label}: ${Math.round(performance.now() - started)} ms; source=${details.source}; partial=${details.partial}; assessment=${details.assessment}; expected text ${found ? "found" : "not found in first two ranges"}${canonicalObserved ? "" : "; expected MDN canonical URL not observed"}`);
+      console.log(`${status.toUpperCase()} ${label}: ${Math.round(performance.now() - started)} ms; source=${details.source}; partial=${details.partial}; assessment=${details.assessment}; expected text ${found ? "found" : "not found in checked ranges"}${canonicalObserved ? "" : "; expected MDN canonical URL not observed"}`);
     } catch (error) {
       const message = redactSecrets(error instanceof Error ? error.message : String(error)).replaceAll(credentials.access, "[redacted]");
       const upstream = !(error instanceof assert.AssertionError) &&
