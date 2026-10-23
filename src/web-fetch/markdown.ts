@@ -313,6 +313,35 @@ export type HtmlToMarkdownOptions = {
   document?: Document;
 };
 
+/** Where relative links point: the page's `<base href>` when it has a usable one. */
+function documentBase(document: Document, baseUrl?: string): string | undefined {
+  const href = document.querySelector("base[href]")?.getAttribute("href")?.trim();
+  if (!href) return baseUrl;
+  try {
+    const base = new URL(href, baseUrl);
+    return base.protocol === "http:" || base.protocol === "https:" ? base.href : baseUrl;
+  } catch {
+    return baseUrl;
+  }
+}
+
+/** Class and id names that mark site chrome rather than page content. */
+const CHROME_NAME = /^(?:footer|sidebar|toc|nav|menu|breadcrumb|masthead|social)$/;
+/** An element this large a share of the page is the page, whatever its class says. */
+const CONTENT_SHARE = 0.4;
+const CONTENT_MIN_CHARS = 500;
+
+/**
+ * Whether a class-marked element is the page itself. Names such as `has-sidebar`,
+ * `menu-open`, or `content-sidebar-wrap` describe state or layout on wrappers that
+ * hold the article; only a small, named block is chrome.
+ */
+function holdsPageText(node: Element, bodyChars: number): boolean {
+  if (node.querySelector('h1, main, [role="main"], article')) return true;
+  const chars = node.textContent?.length ?? 0;
+  return chars >= CONTENT_MIN_CHARS && chars >= bodyChars * CONTENT_SHARE;
+}
+
 function resolveTarget(target: string, baseUrl?: string): string {
   try {
     return new URL(target, baseUrl).toString();
@@ -545,6 +574,7 @@ export function htmlToMarkdown(
   { baseUrl, document = parseDocument(html) }: HtmlToMarkdownOptions = {},
 ): string {
   if (!html) return "";
+  const linkBase = documentBase(document, baseUrl);
   // Mozilla Readability recommends isolating its mutating extraction on a clone (Apache-2.0):
   // https://github.com/mozilla/readability. This parse already owns a disposable DOM.
   for (const node of Array.from(document.querySelectorAll(DROPPED_ELEMENTS))) node.remove();
@@ -558,24 +588,17 @@ export function htmlToMarkdown(
     }
   }
   for (const node of Array.from(document.body.querySelectorAll(CHROME))) node.remove();
+  const bodyChars = document.body.textContent?.length ?? 0;
   for (const node of Array.from(
     document.body.querySelectorAll("div, section, ul, ol, header, footer, aside, nav"),
   )) {
-    // `article-footer` names chrome, but a utility class such as
-    // `lg:grid-cols-sidebar-content` describes layout. Never drop the content root.
     const names = `${node.getAttribute("id") ?? ""} ${node.getAttribute("class") ?? ""}`
       .toLowerCase()
       .split(/\s+/)
       .filter((name) => !/[:[\]/]/.test(name));
     if (
-      names.some((name) =>
-        name
-          .split(/[_-]+/)
-          .some((piece) =>
-            /^(?:footer|sidebar|toc|nav|menu|breadcrumb|masthead|social)$/.test(piece),
-          ),
-      ) &&
-      !node.querySelector('main, [role="main"], article')
+      names.some((name) => name.split(/[_-]+/).some((piece) => CHROME_NAME.test(piece))) &&
+      !holdsPageText(node, bodyChars)
     )
       node.remove();
   }
@@ -610,7 +633,7 @@ export function htmlToMarkdown(
     ) {
       link.removeAttribute("href");
     } else if (href) {
-      link.setAttribute("href", resolveTarget(href, baseUrl));
+      link.setAttribute("href", resolveTarget(href, linkBase));
       if (
         link.childNodes.length === 1 &&
         link.firstChild === link.firstElementChild &&
@@ -626,7 +649,7 @@ export function htmlToMarkdown(
     image.removeAttribute("title");
     const src = image.getAttribute("src")?.trim();
     if (!src || /^(?:data|javascript|vbscript):/i.test(src.replace(/\s/g, ""))) image.remove();
-    else image.setAttribute("src", resolveTarget(src, baseUrl));
+    else image.setAttribute("src", resolveTarget(src, linkBase));
   }
   for (const link of Array.from(root.querySelectorAll("a"))) {
     if (!link.textContent?.trim() && !link.querySelector("img")) link.remove();

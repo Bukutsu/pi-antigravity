@@ -24,11 +24,14 @@ import { generateAntigravityImage, parseImageCommandArgs } from "./image/index.j
 import { executeAntigravitySearch, parseSearchCommandArgs } from "./search/index.js";
 import {
   executeAntigravityWebFetch,
+  discardSavedPage,
   formatWebFetchHeader,
   formatWebFetchResult,
+  looksLikeHtml,
   parseFetchCommandArgs,
-  savePageFile,
+  savePage,
   savedPageNote,
+  type SavedPage,
   withSavedCopy,
   validateFetchTarget,
 } from "./web-fetch/index.js";
@@ -437,15 +440,22 @@ export default function (pi: ExtensionAPI): void {
           url,
           raw: parsed.raw,
         });
-        const full = result.content;
-        const fits = formatWebFetchHeader(result).length + full.length <= (result.maxChars ?? 0);
-        const footer = fits
-          ? ""
-          : savedPageNote(
-              await savePageFile(formatWebFetchHeader(result) + full, parsed.raw ? "html" : "md"),
-              full.length,
-            ).replace("Read the rest with your file tools.", "Open it to read the rest.");
-        emitCommandOutput(ctx, formatWebFetchResult(result, footer));
+        const whole = result.content;
+        let footer = "";
+        let saved: SavedPage | undefined;
+        if (formatWebFetchHeader(result).length + whole.length > (result.maxChars ?? 0)) {
+          // Raw output is the crawled source itself; converted output keeps its provenance.
+          saved = parsed.raw
+            ? await savePage(whole, looksLikeHtml(whole) ? "html" : "txt")
+            : await savePage(formatWebFetchHeader(result) + whole, "md");
+          footer = savedPageNote(saved, whole.length, "Open it to read the rest.");
+        }
+        try {
+          emitCommandOutput(ctx, formatWebFetchResult(result, footer));
+        } catch (error) {
+          if (saved) await discardSavedPage(saved);
+          throw error;
+        }
       } catch (caught) {
         const error = await withSavedCopy(caught);
         const msg = error instanceof Error ? error.message : String(error);

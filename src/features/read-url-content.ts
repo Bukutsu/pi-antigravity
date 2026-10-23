@@ -11,8 +11,10 @@ import {
   formatWebFetchHeader,
   formatWebFetchResult,
   resolveMaxChars,
-  savePageFile,
+  discardSavedPage,
+  savePage,
   savedPageNote,
+  type SavedPage,
   validateFetchTarget,
   withSavedCopy,
 } from "../web-fetch/index.js";
@@ -86,18 +88,25 @@ export default function (pi: Pick<ExtensionAPI, "registerTool">): void {
         const full = result.content;
         const captured = { ...result, maxChars: maxChars - size() };
         let footer = "";
+        let saved: SavedPage | undefined;
         if (formatWebFetchHeader(captured).length + full.length > captured.maxChars) {
           // Pi's convention for long tool output: show the start, keep the whole on disk.
-          // Refuse an unusable budget before leaving a file behind.
-          formatWebFetchResult(captured);
-          const path = await savePageFile(formatWebFetchHeader(result) + full, "md");
-          footer = savedPageNote(path, full.length);
-          details.fullOutputPath = path;
+          saved = await savePage(formatWebFetchHeader(result) + full, "md");
+          footer = savedPageNote(saved, full.length);
+          if (saved.ok) details.fullOutputPath = saved.path;
+          details.truncated = true;
           // The path is part of details too, so charge it before formatting.
           captured.maxChars = maxChars - size();
-          details.truncated = true;
         }
-        const text = formatWebFetchResult(captured, footer);
+        let text: string;
+        try {
+          if (signal?.aborted) throw new Error("Web fetch aborted");
+          text = formatWebFetchResult(captured, footer);
+        } catch (error) {
+          // No answer will name the file, so leave none behind.
+          if (saved) await discardSavedPage(saved);
+          throw error;
+        }
         return {
           content: [{ type: "text", text }],
           details,

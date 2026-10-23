@@ -10,6 +10,7 @@ import { redactSecrets } from "../src/utils/security.js";
 import { cleanText, repairText, boundaryBack, boundaryForward } from "../src/utils/text.js";
 import {
   parseDocument,
+  DocumentLimitError,
   MAX_DOCUMENT_CHARS,
   MAX_DOCUMENT_NODES,
 } from "../src/web-fetch/document.js";
@@ -289,6 +290,57 @@ const reference = page(
 );
 assert.ok(reference.length > 512_000);
 assert.ok(htmlToMarkdown(reference).includes("## Section"));
+// Tag names the parser accepts but the DOM refuses to clone no longer fail the read.
+for (const markup of ["<a<a>x</a>", "<p<p>x", "<z:a<b>x</z:a<b>", '<a<a href="/x">x</a>']) {
+  const rendered = htmlToMarkdown(page("<main><p>Useful text.</p>" + markup + "</main>"));
+  assert.ok(rendered.includes("Useful text.") && rendered.includes("x"), markup);
+}
+// Layout and state classes on a wrapper that holds the article do not delete it.
+const article = "<h1>Heading</h1><p>" + "Substantive article sentence. ".repeat(30) + "</p>";
+for (const className of [
+  "has-sidebar",
+  "menu-open",
+  "nav-open",
+  "with-toc",
+  "content-sidebar-wrap",
+  "footer-wrap",
+]) {
+  const rendered = htmlToMarkdown(
+    page('<div class="' + className + '"><div class="post">' + article + "</div></div>"),
+  );
+  assert.ok(rendered.includes("Substantive article sentence."), className);
+}
+// A utility class describes layout, even on a short, unheaded page.
+assert.ok(
+  htmlToMarkdown(
+    page('<div class="lg:grid-cols-sidebar-content"><p>Short article.</p></div>'),
+  ).includes("Short article."),
+);
+// No heading needed: a wrapper that is most of the page's text is the page.
+assert.ok(
+  htmlToMarkdown(
+    page('<div class="has-sidebar"><p>' + "Plain paragraph text only. ".repeat(40) + "</p></div>"),
+  ).includes("Plain paragraph text only."),
+);
+assert.ok(
+  !htmlToMarkdown(
+    page('<div class="post">' + article + '</div><div class="sidebar">Related links</div>'),
+  ).includes("Related links"),
+);
+// The page's <base href> decides where relative links point.
+assert.ok(
+  htmlToMarkdown(
+    page('<p><a href="rel/x">a link</a></p>').replace(
+      "<head>",
+      '<head><base href="https://other.example/dir/">',
+    ),
+    { baseUrl: "https://example.com/post/" },
+  ).includes("(https://other.example/dir/rel/x)"),
+);
+assert.throws(
+  () => parseDocument("x".repeat(MAX_DOCUMENT_CHARS + 1)),
+  (error: unknown) => error instanceof DocumentLimitError,
+);
 const manyBlocks = Array.from(
   { length: 2000 },
   (_, i) => "<h2>Section " + i + "</h2><p>Body " + i + ' with <a href="/link">a link</a>.</p>',
@@ -420,6 +472,44 @@ try {
   globalThis.fetch = originalFetch;
   if (originalEndpoint === undefined) delete process.env.ANTIGRAVITY_BASE_URL;
   else process.env.ANTIGRAVITY_BASE_URL = originalEndpoint;
+}
+// Raw mode returns the crawled source whatever its size; converted output refuses it.
+{
+  const source =
+    "<!doctype html><html><head><title>T</title></head><body><main>" +
+    "<p>text</p>".repeat(250_000) +
+    "</main></body></html>";
+  assert.ok(source.length > MAX_DOCUMENT_CHARS);
+  const original = globalThis.fetch;
+  const originalBase = process.env.ANTIGRAVITY_BASE_URL;
+  process.env.ANTIGRAVITY_BASE_URL = "https://mock.googleapis.com";
+  globalThis.fetch = async (input) =>
+    new Response(
+      String(input).endsWith(":rewriteUri") ? "{}" : JSON.stringify({ content: source }),
+      {
+        headers: { "content-type": "application/json" },
+      },
+    );
+  try {
+    const key = JSON.stringify({ token: "fixture", projectId: "fixture" });
+    const url = "https://example.com/huge-raw";
+    const raw = await executeAntigravityWebFetch({
+      apiKey: key,
+      url,
+      raw: true,
+      maxChars: 5_000_000,
+    });
+    assert.equal(raw.content, source);
+    assert.ok(raw.notes?.some((note) => note.includes("Not converted")));
+    await assert.rejects(
+      executeAntigravityWebFetch({ apiKey: key, url, maxChars: 5_000_000 }),
+      /too large to convert safely/,
+    );
+  } finally {
+    globalThis.fetch = original;
+    if (originalBase === undefined) delete process.env.ANTIGRAVITY_BASE_URL;
+    else process.env.ANTIGRAVITY_BASE_URL = originalBase;
+  }
 }
 console.log(
   "reader foundations: text, credentials, URL policy, inspection, work bounds, and MDN passed",

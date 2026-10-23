@@ -11,17 +11,45 @@ const VOID = new Set(
 const TOKENS =
   /<!--[\s\S]*?(?:-->|$)|<(script|style|textarea|title|noscript|xmp|iframe|noembed|noframes|plaintext)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)|<\/?([a-z][\w:-]*)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi;
 
+/** The page is beyond what the converter will take on; the source itself is fine. */
+export class DocumentLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DocumentLimitError";
+  }
+}
+
+/**
+ * The parser accepts tag names such as `a<a` that the DOM later refuses to clone, which
+ * would fail the whole read at conversion. Replace each with a span holding its children.
+ */
+function neutralizeInvalidElements(document: Document): void {
+  for (const element of Array.from(document.querySelectorAll("*"))) {
+    try {
+      document.createElement(element.localName);
+      continue;
+    } catch {
+      // Invalid name: replace below.
+    }
+    const span = document.createElement("span");
+    while (element.firstChild) span.appendChild(element.firstChild);
+    element.parentNode?.replaceChild(span, element);
+  }
+}
+
 /** Reject bounded-but-pathological input with an actionable page-level error. */
 export function parseDocument(source: string): Document {
   if (source.length > MAX_DOCUMENT_CHARS)
-    throw new Error(
+    throw new DocumentLimitError(
       "The page is too large to convert safely. Open it in a browser or request a smaller page.",
     );
   const stack: string[] = [];
   let nodes = 0;
   for (const match of source.matchAll(TOKENS)) {
     if (++nodes > MAX_DOCUMENT_NODES)
-      throw new Error("The page has too many elements to convert safely. Open it in a browser.");
+      throw new DocumentLimitError(
+        "The page has too many elements to convert safely. Open it in a browser.",
+      );
     const tag = match[2]?.toLowerCase();
     if (!tag || VOID.has(tag)) continue;
     if (match[0].startsWith("</")) {
@@ -44,8 +72,12 @@ export function parseDocument(source: string): Document {
       if (tag === "option") closeSibling(["option"], ["select", "datalist"]);
       stack.push(tag);
       if (stack.length > MAX_DOCUMENT_DEPTH)
-        throw new Error("The page is nested too deeply to convert safely. Open it in a browser.");
+        throw new DocumentLimitError(
+          "The page is nested too deeply to convert safely. Open it in a browser.",
+        );
     }
   }
-  return createDocument(repairText(source));
+  const document = createDocument(repairText(source));
+  neutralizeInvalidElements(document);
+  return document;
 }

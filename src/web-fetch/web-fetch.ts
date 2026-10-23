@@ -25,12 +25,13 @@ import { antigravityFetch } from "../utils/http.js";
 import { boundaryForward, capText, cleanText, elideMiddle, repairText } from "../utils/text.js";
 import { redactSecrets, safeError } from "../utils/security.js";
 import { antigravityEnv, isRecord } from "../utils/util.js";
+import { DocumentLimitError } from "./document.js";
 import { looksLikeHtml } from "./markdown.js";
 
-import { articleRepresentation, inspectPage, type PageInspection } from "./inspect.js";
-import { inspectMdnRepresentation, mdnRepresentationUrl } from "./mdn.js";
-import { siteRepresentation } from "./sites.js";
+import { inspectPage, inspectUnconverted, type PageInspection } from "./inspect.js";
 import { mediaKind } from "./media.js";
+import { representationFor } from "./representation.js";
+import { siteRepresentation } from "./sites.js";
 import { DEFAULT_WEB_FETCH_MAX_CHARS, WEB_FETCH_TIMEOUT_MS, MAX_RESPONSE_BYTES } from "./limits.js";
 import { formatWebFetchHeader } from "./header.js";
 import { FENCE_LINE, unclosedFence } from "./fences.js";
@@ -467,6 +468,22 @@ function toResult(params: {
   };
 }
 
+/** Inspect a page; raw mode keeps a source beyond the conversion limits as it is. */
+function inspectSource(
+  content: string,
+  url: string,
+  contentType: string | undefined,
+  raw: boolean | undefined,
+): PageInspection {
+  try {
+    return inspectPage(content, url, contentType);
+  } catch (error) {
+    if (raw && error instanceof DocumentLimitError)
+      return inspectUnconverted(content, error.message);
+    throw error;
+  }
+}
+
 function recordFailure(
   attempt: NonNullable<WebFetchResult["attempts"]>[number],
   error: unknown,
@@ -728,7 +745,7 @@ async function fetchPage(options: WebFetchOptions): Promise<WebFetchResult> {
           content,
           resolvedUrl,
           source,
-          inspection: inspectPage(content, resolvedUrl, contentType),
+          inspection: inspectSource(content, resolvedUrl, contentType, options.raw),
         };
         attempt.outcome = `${candidate.inspection.assessment}; source ${candidate.inspection.completeness}`;
         retain(candidate);
@@ -749,7 +766,7 @@ async function fetchPage(options: WebFetchOptions): Promise<WebFetchResult> {
         )
           throw new WebFetchError(requestedUrl, safeError(error), attempts);
         lastError = capText(repairText(safeError(error)), 400);
-        const unconvertible = error instanceof Error && /convert safely/.test(error.message);
+        const unconvertible = error instanceof DocumentLimitError;
         if (unconvertible && lastContent) {
           unconvertedCopy = repairText(lastContent);
           for (const url of [requestedUrl, resolvedUrl])
@@ -760,30 +777,22 @@ async function fetchPage(options: WebFetchOptions): Promise<WebFetchResult> {
     }
     // Raw mode means the requested page source, not a substituted representation.
     const discovery = alternatePage ?? page;
-    const mdnUrl = mdnRepresentationUrl(resolvedUrl);
-    const site = siteRepresentation(resolvedUrl);
-    const alternate = !options.raw
-      ? (discovery?.inspection.alternates[0] ??
-        site ??
-        (mdnUrl ? { url: mdnUrl, type: "application/json" as const } : undefined))
-      : undefined;
-    if (alternate && discovery && !deadline.aborted && !alternateTried) {
+    const representation = options.raw
+      ? undefined
+      : representationFor(resolvedUrl, discovery?.inspection.alternates[0]);
+    if (representation && !deadline.aborted && !alternateTried) {
       alternateTried = true;
       aborted();
       let representationAttempt: NonNullable<WebFetchResult["attempts"]>[number] | undefined;
       try {
-        const url = validateFetchTarget(alternate.url);
+        const url = validateFetchTarget(representation.url);
         rejectPdfUrl(url);
-        // Resolve explicitly, so advertised links cannot redirect recovery to a different origin.
-        // A known site copy is fetched as built: Google rewrites GitHub file pages back to raw.
-        const redirected =
-          site && alternate.url === site.url
-            ? undefined
-            : await resolveRedirect(endpoint, url, headers, signal, true, request);
+        const redirected = representation.resolve
+          ? await resolveRedirect(endpoint, url, headers, signal, true, request)
+          : undefined;
         aborted();
         if (deadline.aborted) break;
-        // Advertised links share the page's origin; a known site copy keeps its own.
-        if (redirected && new URL(redirected).origin !== new URL(alternate.url).origin) {
+        if (redirected && new URL(redirected).origin !== new URL(url).origin) {
           attempts.push({
             url: cleanText(redactSecrets(url), 2_048)!,
             source: "live",
@@ -813,71 +822,38 @@ async function fetchPage(options: WebFetchOptions): Promise<WebFetchResult> {
           representationAttempt.outcome = `HTTP ${response.status}`;
           if (response.status === 200) {
             const content = parseTrawlerContent(response.data);
-            if (
-              content !== undefined &&
-              isPdfContent(content, parseTrawlerContentType(response.data))
-            )
-              throw pdfError();
-            const mdn =
-              content !== undefined && alternate.url === mdnUrl
-                ? inspectMdnRepresentation(content, resolvedUrl)
-                : undefined;
-            const siteCopy =
-              content !== undefined && site && alternate.url === site.url
-                ? site.extract(content)
-                : undefined;
             const reportedType = parseTrawlerContentType(response.data);
-            const jsonRepresentation =
-              !siteCopy &&
-              (mediaKind(reportedType) === "json" ||
-                (alternate.type === "application/json" && /^\s*[{[]/.test(content ?? "")));
-            const body =
-              mdn?.html ??
-              (site && alternate.url === site.url
-                ? siteCopy?.text
-                : content === undefined
-                  ? undefined
-                  : jsonRepresentation
-                    ? articleRepresentation(content, resolvedUrl)
-                    : content);
-            if (body?.trim()) {
-              const articleUrl = mdn?.resolvedUrl ?? resolvedUrl;
-              // Decoded article fields are no longer the JSON response envelope.
-              const alternateContentType = siteCopy
-                ? siteCopy.contentType
-                : mdn || jsonRepresentation
-                  ? undefined
-                  : reportedType;
-              const inspection = inspectPage(body, articleUrl, alternateContentType);
-              const representationLanguage =
-                inspection.metadata.language ?? mdn?.metadata.language ?? alternate.language;
-              if (mdn) {
-                inspection.completeness = mdn.completeness;
-                inspection.notes = mdn.notes;
-              }
-              if (siteCopy?.complete) inspection.completeness = "complete";
+            if (content !== undefined && isPdfContent(content, reportedType)) throw pdfError();
+            const document =
+              content === undefined
+                ? undefined
+                : representation.read(content, reportedType, resolvedUrl);
+            if (document?.body.trim()) {
+              const articleUrl = document.articleUrl ?? resolvedUrl;
+              const inspection = inspectPage(document.body, articleUrl, document.contentType);
+              if (document.completeness) inspection.completeness = document.completeness;
+              if (document.notes) inspection.notes = document.notes;
+              const defined = (metadata: object | undefined) =>
+                Object.fromEntries(
+                  Object.entries(metadata ?? {}).filter(([, value]) => value !== undefined),
+                );
               inspection.metadata = {
-                ...discovery.inspection.metadata,
-                ...Object.fromEntries(
-                  Object.entries(mdn?.metadata ?? {}).filter(([, value]) => value !== undefined),
-                ),
-                ...Object.fromEntries(
-                  Object.entries(inspection.metadata).filter(([, value]) => value !== undefined),
-                ),
+                ...discovery?.inspection.metadata,
+                ...defined(document.metadata),
+                ...defined(inspection.metadata),
               };
-              const alternateLanguage = representationLanguage;
-              const pageLanguage = discovery.inspection.metadata.language;
+              const alternateLanguage =
+                inspection.metadata.language ?? document.language ?? representation.language;
+              const pageLanguage = discovery?.inspection.metadata.language;
               if (alternateLanguage) inspection.metadata.language = alternateLanguage;
               // The alternate was chosen by base language, so the note compares the same.
               const sameLanguage =
                 alternateLanguage?.split("-")[0].toLowerCase() ===
                 pageLanguage?.split("-")[0].toLowerCase();
-              if (alternateLanguage && pageLanguage && !sameLanguage) {
-                attempts[attempts.length - 1].outcome =
-                  `${inspection.assessment}; alternate language ${alternateLanguage}`;
-              } else {
-                attempts[attempts.length - 1].outcome = inspection.assessment;
-              }
+              representationAttempt.outcome =
+                alternateLanguage && pageLanguage && !sameLanguage
+                  ? `${inspection.assessment}; alternate language ${alternateLanguage}`
+                  : inspection.assessment;
               const candidate: Candidate = {
                 content: content!,
                 resolvedUrl: articleUrl,
@@ -897,8 +873,7 @@ async function fetchPage(options: WebFetchOptions): Promise<WebFetchResult> {
               safeError(fetchError(response.text, response.status, "representation")),
               400,
             );
-            attempts[attempts.length - 1].outcome =
-              `HTTP ${response.status}${usable(best) ? "; retained usable copy" : ""}`;
+            representationAttempt.outcome = `HTTP ${response.status}${usable(best) ? "; retained usable copy" : ""}`;
           }
         }
       } catch (error) {

@@ -275,6 +275,21 @@ export function inspectPage(content: string, url: string, contentType?: string):
   };
 }
 
+/**
+ * Inspection of a source the converter will not take on. Raw mode returns the crawled
+ * source as it is, so the page's size limits the answer, not the read.
+ */
+export function inspectUnconverted(content: string, reason: string): PageInspection {
+  return {
+    rendered: "",
+    completeness: classifyCopyCompleteness(content),
+    assessment: content.trim() ? "readable" : "empty",
+    notes: [`Not converted: ${reason}`],
+    metadata: {},
+    alternates: [],
+  };
+}
+
 /** Decode only explicit article-body JSON shapes from an advertised representation. */
 export function articleRepresentation(content: string, articleUrl: string): string | undefined {
   let value: unknown;

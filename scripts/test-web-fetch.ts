@@ -588,17 +588,53 @@ async function scenarioOversized(): Promise<void> {
 
 /** Pages beyond the conversion limits are saved unconverted, not just refused. */
 async function scenarioUnconverted(): Promise<void> {
-  const html = "<html><body><main>" + "<br>".repeat(60_000) + "</main></body></html>";
+  const secretUrl = "https://example.com/huge?access_token=SECRETVALUE";
+  const html = `<html><body><main><p>${secretUrl}</p>${"<br>".repeat(60_000)}</main></body></html>`;
   calls.length = 0;
   handler = (_body, url) => (url.endsWith(":rewriteUri") ? json({}) : json({ content: html }));
-  const error = await read("https://example.com/huge").then(
+  const error = await read(secretUrl).then(
     () => strictAssert.fail("an unconvertible page must not be returned as converted"),
     (caught: unknown) => caught as Error,
   );
   strictAssert.match(error.message, /too many elements to convert safely/);
   const path = /saved to: (\S+page\.html)\./.exec(error.message)?.[1];
   strictAssert.ok(path && path.startsWith(scratch), "the error names the saved copy");
-  strictAssert.equal(readFileSync(path, "utf8"), html);
+  const kept = readFileSync(path, "utf8");
+  strictAssert.ok(
+    !kept.includes("SECRETVALUE"),
+    "the saved copy must not hold the caller's secret",
+  );
+  strictAssert.equal(
+    kept,
+    html.replace(secretUrl, "https://example.com/huge?access_token=[redacted]"),
+  );
+  strictAssert.ok(!error.message.includes("SECRETVALUE"));
+}
+
+/** A save that fails is reported in the answer; the page that was read is not lost. */
+async function scenarioSaveFailure(): Promise<void> {
+  const body = "Words of the page. ".repeat(400);
+  const original = process.env.TMPDIR;
+  process.env.TMPDIR = join(scratch, "does-not-exist");
+  try {
+    handler = (_body, url) =>
+      url.endsWith(":rewriteUri") ? json({}) : json({ content: article(body) });
+    const long = await read("https://example.com/unsaved", { maxChars: 1_000 });
+    strictAssert.ok(textOf(long).includes("could not be saved"), "the answer says the save failed");
+    strictAssert.ok(bodyOf(long).includes("Words of the page."), "the page is still returned");
+    strictAssert.equal(long.details.fullOutputPath, undefined);
+    strictAssert.ok(textOf(long).length + JSON.stringify(long.details).length <= 1_000);
+
+    const huge = "<html><body><main>" + "<br>".repeat(60_000) + "</main></body></html>";
+    handler = (_body, url) => (url.endsWith(":rewriteUri") ? json({}) : json({ content: huge }));
+    await strictAssert.rejects(
+      read("https://example.com/unsaved-huge"),
+      /too many elements to convert safely.*unconverted HTML .* could not be saved/s,
+      "the page's own failure survives a failed save",
+    );
+  } finally {
+    process.env.TMPDIR = original;
+  }
 }
 
 /** A budget too small to answer fails before leaving a file behind. */
@@ -606,11 +642,14 @@ async function scenarioBudgetFailure(): Promise<void> {
   handler = (_body, url) =>
     url.endsWith(":rewriteUri") ? json({}) : json({ content: article("Body. ".repeat(500)) });
   const before = readdirCount();
-  await strictAssert.rejects(
-    read("https://example.com/budget-failure", { maxChars: 1 }),
-    /budget is too small/,
-  );
-  strictAssert.equal(readdirCount(), before);
+  // 1 fails before saving; 300 and 400 fit the header but not the saved-page footer.
+  for (const maxChars of [1, 300, 400]) {
+    await strictAssert.rejects(
+      read("https://example.com/budget-failure", { maxChars }),
+      /budget is too small/,
+    );
+    strictAssert.equal(readdirCount(), before, `no file is left behind at ${maxChars}`);
+  }
 }
 
 function readdirCount(): number {
@@ -619,7 +658,6 @@ function readdirCount(): number {
 
 /** Wikipedia's cut-off article page recovers through its identity-checked parse API. */
 async function scenarioWikipedia(): Promise<void> {
-  const page = "https://en.wikipedia.org/wiki/Unix_philosophy";
   const parse = (title: string, redirects: unknown[] = []) =>
     JSON.stringify({
       parse: {
@@ -628,11 +666,44 @@ async function scenarioWikipedia(): Promise<void> {
         text: '<div class="mw-parser-output"><p>The Unix philosophy emphasizes small composable tools.</p></div>',
       },
     });
-  for (const [answer, recovered] of [
-    [parse("Unix philosophy"), true],
-    [parse("Unix design", [{ from: "Unix philosophy", to: "Unix design" }]), true],
-    [parse("Other article"), false],
-    [parse("Unix philosophy").slice(0, -20), false],
+  const apiPage = (): string | undefined => {
+    const api = calls.find((call) => String(call.body.url).includes("/w/api.php?"));
+    return (api && new URL(String(api.body.url)).searchParams.get("page")) ?? undefined;
+  };
+  for (const [requested, answer, recovered, page] of [
+    [
+      "https://en.wikipedia.org/wiki/Unix_philosophy",
+      parse("Unix philosophy"),
+      true,
+      "Unix_philosophy",
+    ],
+    // MediaWiki capitalizes the first letter, so this is the same article.
+    [
+      "https://en.wikipedia.org/wiki/unix_philosophy",
+      parse("Unix philosophy"),
+      true,
+      "unix_philosophy",
+    ],
+    [
+      "https://en.wikipedia.org/wiki/Unix_design",
+      parse("Unix philosophy", [{ from: "Unix design", to: "Unix philosophy" }]),
+      true,
+      "Unix_design",
+    ],
+    // A title may contain slashes.
+    ["https://en.wikipedia.org/wiki/AC/DC", parse("AC/DC"), true, "AC/DC"],
+    [
+      "https://en.wikipedia.org/wiki/Unix_philosophy",
+      parse("Other article"),
+      false,
+      "Unix_philosophy",
+    ],
+    [
+      "https://en.wikipedia.org/wiki/Unix_philosophy",
+      parse("Unix philosophy").slice(0, -20),
+      false,
+      "Unix_philosophy",
+    ],
   ] as const) {
     calls.length = 0;
     handler = (body, url) => {
@@ -641,18 +712,40 @@ async function scenarioWikipedia(): Promise<void> {
         return json({ content: answer });
       return json({ content: cutArticle("") });
     };
-    const result = await read(page, { maxChars: 4_000 });
+    const result = await read(requested, { maxChars: 4_000 });
     strictAssert.equal(
       bodyOf(result).includes("small composable tools"),
       recovered,
       recovered ? "the verified article is used" : "another or a cut-off article is never used",
     );
     if (recovered) strictAssert.equal(result.details.partial, false);
-    const api = calls.find((call) => String(call.body.url).includes("/w/api.php?"));
+    strictAssert.equal(apiPage(), page);
+  }
+  // A revision, a search, and a special page are not the current article: no substitute.
+  for (const unsupported of [
+    "https://en.wikipedia.org/wiki/Unix_philosophy?oldid=1",
+    "https://en.wikipedia.org/wiki/Special:Random",
+  ]) {
+    calls.length = 0;
+    handler = (_body, url) =>
+      url.endsWith(":rewriteUri") ? json({}) : json({ content: cutArticle("Cut copy.") });
+    await read(unsupported, { maxChars: 4_000 });
     strictAssert.ok(
-      api && new URL(String(api.body.url)).searchParams.get("page") === "Unix_philosophy",
+      !calls.some((call) => String(call.body.url).includes("/w/api.php")),
+      `${unsupported} must not use the parse API`,
     );
   }
+  // The article is recovered even when Google cannot serve the article page at all.
+  calls.length = 0;
+  handler = (body, url) => {
+    if (url.endsWith(":rewriteUri")) return json({});
+    if (String(body.url).includes("/w/api.php")) return json({ content: parse("Unix philosophy") });
+    return json({ error: { code: 500, message: "Internal error encountered." } }, 500);
+  };
+  const unavailable = await read("https://en.wikipedia.org/wiki/Unix_philosophy", {
+    maxChars: 4_000,
+  });
+  strictAssert.ok(bodyOf(unavailable).includes("small composable tools"));
 }
 
 /** A cut raw GitHub file recovers through the file page's own full line list. */
@@ -682,12 +775,75 @@ async function scenarioGithubRaw(): Promise<void> {
     };
     const result = await read(raw, { maxChars: 4_000 });
     strictAssert.equal(bodyOf(result).includes("// the end of the file"), recovered);
+    if (recovered) strictAssert.equal(bodyOf(result), lines.join("\n"));
     strictAssert.ok(
       !calls.some((call) => call.url.endsWith(":rewriteUri") && call.body.originalUri === blob),
       "Google rewrites file pages back to raw, so the file page is not resolved",
     );
-    if (recovered) strictAssert.equal(bodyOf(result), lines.join("\n"));
   }
+  // The file is recovered even when Google cannot serve the raw URL at all.
+  calls.length = 0;
+  handler = (body, url) => {
+    if (url.endsWith(":rewriteUri")) return json({});
+    if (body.url === blob) return json({ content: page("src/index.ts") });
+    return json({ error: { code: 500, message: "Internal error encountered." } }, 500);
+  };
+  const unavailable = await read(raw, { maxChars: 4_000 });
+  strictAssert.equal(bodyOf(unavailable), lines.join("\n"));
+}
+
+/** /antigravity.fetch saves a long page too, and raw output is the source itself. */
+async function scenarioCommand(): Promise<void> {
+  const { default: register } = await import("../src/index.js");
+  const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+  register({
+    registerCommand: (
+      name: string,
+      definition: { handler: (args: string, ctx: unknown) => Promise<void> },
+    ) => commands.set(name, definition),
+    registerProvider() {},
+    registerTool() {},
+    on() {},
+    getCommands: () => [],
+  } as unknown as Parameters<typeof register>[0]);
+  const output: string[] = [];
+  const ctx = {
+    hasUI: true,
+    ui: { notify: (message: string) => output.push(message) },
+    modelRegistry: {
+      async getApiKeyForProvider() {
+        return apiKey;
+      },
+    },
+  };
+  const source = article("Command page. ".repeat(500));
+  handler = (_body, url) => (url.endsWith(":rewriteUri") ? json({}) : json({ content: source }));
+  process.env.ANTIGRAVITY_WEB_FETCH_MAX_CHARS = "1000";
+  const command = commands.get("antigravity.fetch")!;
+  const savedPath = (): string => {
+    const path = /saved to: (\S+page\.\w+) \(/.exec(output.at(-1) ?? "")?.[1];
+    if (!path?.startsWith(scratch)) strictAssert.fail("the command output names a saved page");
+    return path;
+  };
+
+  await command.handler("https://example.com/command", ctx);
+  const converted = savedPath();
+  strictAssert.ok(converted.endsWith("page.md"));
+  strictAssert.ok(readFileSync(converted, "utf8").startsWith("Page metadata"));
+  strictAssert.ok((output.at(-1) ?? "").length <= 1_000);
+
+  // A cap that cannot hold the footer fails without leaving a saved page behind.
+  const filesBefore = readdirCount();
+  process.env.ANTIGRAVITY_WEB_FETCH_MAX_CHARS = "150";
+  await command.handler("https://example.com/command-tiny", ctx);
+  strictAssert.match(output.at(-1) ?? "", /budget is too small/);
+  strictAssert.equal(readdirCount(), filesBefore);
+  process.env.ANTIGRAVITY_WEB_FETCH_MAX_CHARS = "1000";
+
+  await command.handler("--raw https://example.com/command-raw", ctx);
+  const rawPath = savedPath();
+  strictAssert.ok(rawPath.endsWith("page.html"));
+  strictAssert.equal(readFileSync(rawPath, "utf8"), source, "raw output saves the source itself");
 }
 
 async function scenarioLifecycle(): Promise<void> {
@@ -754,9 +910,11 @@ try {
   await scenarioTruncatedCopy();
   await scenarioOversized();
   await scenarioUnconverted();
+  await scenarioSaveFailure();
   await scenarioBudgetFailure();
   await scenarioWikipedia();
   await scenarioGithubRaw();
+  await scenarioCommand();
   await scenarioLifecycle();
   console.log(
     "read_url_content: end-to-end fetch, recovery, redaction and saved-page checks passed",

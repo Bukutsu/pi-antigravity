@@ -7,14 +7,7 @@
  * identity is verified against the requested page, and never reconstructed.
  */
 import { isRecord } from "../utils/util.js";
-
-export type SiteRepresentation = {
-  url: string;
-  type: "text/html";
-  language?: string;
-  /** Article text from the response, or undefined when it is not the expected document. */
-  extract(content: string): { text: string; contentType?: string; complete: boolean } | undefined;
-};
+import type { Representation } from "./representation.js";
 
 function decodedPath(value: string): string | undefined {
   try {
@@ -22,6 +15,15 @@ function decodedPath(value: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** MediaWiki capitalizes the first letter of a title, so `unix_philosophy` is `Unix philosophy`. */
+function sameTitle(a: string, b: string): boolean {
+  const normal = (title: string) => {
+    const spaced = title.replace(/ /g, "_");
+    return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+  };
+  return normal(a) === normal(b);
 }
 
 function escapeHtml(text: string): string {
@@ -32,8 +34,8 @@ function escapeHtml(text: string): string {
  * Wikipedia's parse API for `https://<lang>.wikipedia.org/wiki/<title>`. Its JSON
  * names the article, and a JSON document that parses is not cut off.
  */
-function wikipedia(url: URL): SiteRepresentation | undefined {
-  const segment = /^\/wiki\/([^/]+)$/.exec(url.pathname)?.[1];
+function wikipedia(url: URL): Representation | undefined {
+  const segment = /^\/wiki\/(.+)$/.exec(url.pathname)?.[1];
   if (!/^[a-z0-9-]+\.wikipedia\.org$/.test(url.hostname) || url.search || !segment)
     return undefined;
   const title = decodedPath(segment);
@@ -51,8 +53,8 @@ function wikipedia(url: URL): SiteRepresentation | undefined {
   }).toString();
   return {
     url: api.href,
-    type: "text/html",
-    extract(content) {
+    resolve: false,
+    read(content) {
       let data: unknown;
       try {
         data = JSON.parse(content);
@@ -69,20 +71,20 @@ function wikipedia(url: URL): SiteRepresentation | undefined {
           : []),
       ];
       // The article must be the requested one, directly or through its redirect.
-      if (!names.some((name) => typeof name === "string" && name.replace(/ /g, "_") === title))
+      if (!names.some((name) => typeof name === "string" && sameTitle(name, title)))
         return undefined;
       const heading = escapeHtml(parse.title);
       return {
-        text: `<!doctype html><html><head><title>${heading}</title></head><body><main><h1>${heading}</h1>${parse.text}</main></body></html>`,
+        body: `<!doctype html><html><head><title>${heading}</title></head><body><main><h1>${heading}</h1>${parse.text}</main></body></html>`,
         contentType: "text/html",
-        complete: true,
+        completeness: "complete",
       };
     },
   };
 }
 
 /** GitHub's file page for `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>`. */
-function githubRaw(url: URL): SiteRepresentation | undefined {
+function githubRaw(url: URL): Representation | undefined {
   const parts = url.pathname.split("/").slice(1);
   if (url.hostname !== "raw.githubusercontent.com" || url.search || parts.length < 4)
     return undefined;
@@ -91,8 +93,8 @@ function githubRaw(url: URL): SiteRepresentation | undefined {
   const blob = `https://github.com/${owner}/${repository}/blob/${rest.join("/")}`;
   return {
     url: blob,
-    type: "text/html",
-    extract(content) {
+    resolve: false,
+    read(content) {
       const embedded =
         /<script type="application\/json" data-target="react-app\.embeddedData">([\s\S]*?)<\/script>/.exec(
           content,
@@ -124,13 +126,13 @@ function githubRaw(url: URL): SiteRepresentation | undefined {
         !lines.every((line) => typeof line === "string")
       )
         return undefined;
-      return { text: lines.join("\n"), contentType: "text/plain", complete: true };
+      return { body: lines.join("\n"), contentType: "text/plain", completeness: "complete" };
     },
   };
 }
 
 /** A fuller copy the publisher serves for this page, when one is known. */
-export function siteRepresentation(articleUrl: string): SiteRepresentation | undefined {
+export function siteRepresentation(articleUrl: string): Representation | undefined {
   const url = new URL(articleUrl);
   return wikipedia(url) ?? githubRaw(url);
 }
