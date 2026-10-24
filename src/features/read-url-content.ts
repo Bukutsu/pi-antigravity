@@ -5,7 +5,7 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
-import { isExtraToolEnabled, redactSecrets } from "../utils/index.js";
+import { extraToolExposure, isExtraToolEnabled, redactSecrets } from "../utils/index.js";
 import {
   executeAntigravityWebFetch,
   formatWebFetchHeader,
@@ -22,6 +22,7 @@ import {
 export default function (pi: Pick<ExtensionAPI, "registerTool">): void {
   if (!isExtraToolEnabled("FETCH")) return;
   pi.registerTool({
+    ...extraToolExposure(),
     name: "read_url_content",
     label: "Read URL Content",
     description:
