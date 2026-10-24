@@ -6,12 +6,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { executeAntigravitySearch } from "../search/index.js";
-import { configureExtraToolExposure, isExtraToolEnabled, redactSecrets } from "../utils/index.js";
+import { extraToolExposure, isExtraToolEnabled, redactSecrets } from "../utils/index.js";
 
 export default function (pi: ExtensionAPI): void {
   if (!isExtraToolEnabled("SEARCH")) return;
   pi.registerTool({
-    ...configureExtraToolExposure("google_search"),
+    ...extraToolExposure(),
     name: "google_search",
     label: "Google Search",
     description:

@@ -10,12 +10,12 @@ import {
   generateAntigravityImage,
   IMAGE_ASPECT_RATIOS,
 } from "../image/index.js";
-import { configureExtraToolExposure, isExtraToolEnabled } from "../utils/index.js";
+import { extraToolExposure, isExtraToolEnabled } from "../utils/index.js";
 
 export default function (pi: ExtensionAPI): void {
   if (!isExtraToolEnabled("IMAGE")) return;
   pi.registerTool({
-    ...configureExtraToolExposure("generate_image"),
+    ...extraToolExposure(),
     name: "generate_image",
     label: "Generate image",
     description:

@@ -7,7 +7,7 @@ All notable changes to this project are documented in this file.
 ### Added
 
 - **`read_url_content` tool:** Reads public pages through Google's Antigravity fetch service and converts HTML to Markdown. Inadequate cached copies retry live, with useful cached content retained on recovery failure. The tool inspects metadata and article-matched JSON-LD before cleanup, and can recover through one advertised same-origin Markdown or supported article-JSON representation. Results distinguish source completeness, suspected content problems, and output truncation, and report retrieval attempts and provenance. Pages too long for one answer are saved whole to a private temp file named in the answer. `/antigravity.fetch [--raw] <url>` exposes interactive fetching; raw mode preserves the crawled source. Disable with `ANTIGRAVITY_NO_FETCH_TOOL=1`, `ANTIGRAVITY_NO_EXTRA_TOOLS=1`, or the `read-url-content` resource in `pi config`.
-- **Deferred extra tools:** `ANTIGRAVITY_DEFER_TOOLS=1` keeps enabled `google_search` and `generate_image` tools available to codemode without declaring them to the model on Pi 0.99.2+. Direct exposure remains the default; tool-disable controls still take precedence.
+- **Deferred extra tools:** `ANTIGRAVITY_DEFER_TOOLS=1` keeps enabled `google_search`, `read_url_content`, and `generate_image` tools available to codemode without declaring them to the model on Pi 0.99.2+. Direct exposure remains the default; tool-disable controls still take precedence.
 
 ### Changed
 

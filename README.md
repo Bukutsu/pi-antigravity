@@ -223,10 +223,11 @@ All primary environment variables start with `ANTIGRAVITY_`. The legacy `NOAGY_`
 | `ANTIGRAVITY_NO_IMAGE_TOOL` | Set to `1` to skip only the `generate_image` tool. |
 | `ANTIGRAVITY_DEFER_TOOLS` | Set to `1` to register `google_search` and `generate_image` as deferred (hidden from the model, callable from codemode scripts). Needs `codemode` or `tool_search` active, e.g. `"defaultTools": ["+codemode"]`. Requires Pi 0.99.2+; older Pi keeps them direct. |
 | `ANTIGRAVITY_WEB_FETCH_MAX_CHARS` | Character budget for one `read_url_content` result. Defaults to 60000, roughly 15k tokens. |
+| `ANTIGRAVITY_DEFER_TOOLS` | Set to `1` to register `google_search`, `read_url_content`, and `generate_image` as deferred: they aren't declared to the model, but codemode scripts can call them and `tool_search` can load them. Needs `codemode` or `tool_search` active, e.g. `"defaultTools": ["+codemode"]`. Requires Pi 0.99.2+; older Pi keeps them direct. |
 
 `pi config` can disable each model-facing tool without disabling the provider. The package loads four extension resources: `src/index.ts` (provider, OAuth, and slash commands), `src/features/google-search.ts` (`google_search`), `src/features/read-url-content.ts` (`read_url_content`), and `src/features/generate-image.ts` (`generate_image`). Turn off a feature resource there to stop registering that tool. `/antigravity.search`, `/antigravity.fetch`, and `/antigravity.image` stay available from the provider extension.
 
-Environment variables still force a loaded tool off, including in scripts and headless runs. They cannot turn a resource back on after `pi config` disables it, because that file is not loaded. Either control is enough to hide the tool from the model. Run `/reload` after changing `pi config` or the environment in an active session; a new Pi process also picks the change up. A restart is not required when `/reload` succeeds.
+Environment variables still force a loaded tool off, including in scripts and headless runs. They cannot turn a resource back on after `pi config` disables it, because that file is not loaded. Either control is enough to hide the tool from the model. Run `/reload` after changing `pi config`.
 
 By default, the provider tries `https://daily-cloudcode-pa.googleapis.com`, then the sandbox host, then `https://cloudcode-pa.googleapis.com`. Prefer the built-in OAuth client unless you have a reason to use your own credentials.
 

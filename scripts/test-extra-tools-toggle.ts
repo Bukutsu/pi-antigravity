@@ -5,13 +5,7 @@ import registerFetch from "../src/features/read-url-content.js";
 import registerSearch from "../src/features/google-search.js";
 import register from "../src/index.js";
 
-const TOGGLES = [
-  "NO_EXTRA_TOOLS",
-  "NO_SEARCH_TOOL",
-  "NO_IMAGE_TOOL",
-  "NO_FETCH_TOOL",
-  "DEFER_TOOLS",
-];
+const TOGGLES = ["NO_EXTRA_TOOLS", "NO_SEARCH_TOOL", "NO_IMAGE_TOOL", "NO_FETCH_TOOL", "DEFER_TOOLS"];
 
 function withEnv<T>(env: Record<string, string>, run: () => T): T {
   const saved = new Map<string, string | undefined>();
@@ -58,9 +52,6 @@ function registeredTools(env: Record<string, string>): { tools: string[]; comman
 type ToolDefinition = {
   name: string;
   exposure?: string;
-  prepareLoadout?: (loadout: { declared: readonly { name: string }[] }) =>
-    | { hiddenDeclarations: string[] }
-    | undefined;
 };
 
 function featureDefinitions(env: Record<string, string>): ToolDefinition[] {
@@ -79,12 +70,12 @@ function featureDefinitions(env: Record<string, string>): ToolDefinition[] {
   withEnv(env, () => {
     registerSearch(pi as ExtensionAPI);
     registerImage(pi as ExtensionAPI);
+    registerFetch(pi as ExtensionAPI);
   });
   return definitions;
 }
 
-const both = ["generate_image", "google_search"];
-const allTools = [...both, "read_url_content"];
+const allTools = ["generate_image", "google_search", "read_url_content"];
 assert.deepEqual(registeredTools({}).tools, allTools, "all tools are registered by default");
 assert.deepEqual(registeredTools({ ANTIGRAVITY_NO_EXTRA_TOOLS: "1" }).tools, [], "umbrella toggle");
 assert.deepEqual(
@@ -99,7 +90,7 @@ assert.deepEqual(
 );
 assert.deepEqual(
   registeredTools({ ANTIGRAVITY_NO_FETCH_TOOL: "1" }).tools,
-  both,
+  ["generate_image", "google_search"],
   "fetch toggle keeps image and search tools",
 );
 assert.deepEqual(
@@ -109,7 +100,7 @@ assert.deepEqual(
 );
 assert.deepEqual(
   registeredTools({ NOAGY_NO_FETCH_TOOL: "1" }).tools,
-  both,
+  ["generate_image", "google_search"],
   "legacy fetch toggle is honoured",
 );
 assert.deepEqual(
@@ -128,8 +119,8 @@ assert.ok(
 
 for (const env of [{}, { ANTIGRAVITY_DEFER_TOOLS: "0" }]) {
   const definitions = featureDefinitions(env);
-  assert.equal(definitions.length, 2);
-  assert.ok(definitions.every((tool) => !("exposure" in tool) && !("prepareLoadout" in tool)));
+  assert.equal(definitions.length, 3);
+  assert.ok(definitions.every((tool) => !("exposure" in tool)));
 }
 
 for (const env of [
@@ -138,38 +129,19 @@ for (const env of [
 ]) {
   const definitions = featureDefinitions(env);
   assert.deepEqual(
-    definitions.map((tool) => ({
-      name: tool.name,
-      exposure: tool.exposure,
-      loadout: tool.prepareLoadout?.({ declared: [{ name: tool.name }] }),
-    })),
+    definitions.map((tool) => ({ name: tool.name, exposure: tool.exposure })),
     [
-      {
-        name: "google_search",
-        exposure: "deferred",
-        loadout: { hiddenDeclarations: ["google_search"] },
-      },
-      {
-        name: "generate_image",
-        exposure: "deferred",
-        loadout: { hiddenDeclarations: ["generate_image"] },
-      },
+      { name: "google_search", exposure: "deferred" },
+      { name: "generate_image", exposure: "deferred" },
+      { name: "read_url_content", exposure: "deferred" },
     ],
   );
-  for (const tool of definitions) {
-    assert.equal(
-      tool.prepareLoadout?.({
-        declared: [{ name: "tool_search" }, { name: tool.name }],
-      }),
-      undefined,
-      `${tool.name} is declared after tool_search loads it`,
-    );
-  }
 }
 
 for (const [toggle, expectedNames] of [
-  ["NO_SEARCH_TOOL", ["generate_image"]],
-  ["NO_IMAGE_TOOL", ["google_search"]],
+  ["NO_SEARCH_TOOL", ["generate_image", "read_url_content"]],
+  ["NO_IMAGE_TOOL", ["google_search", "read_url_content"]],
+  ["NO_FETCH_TOOL", ["google_search", "generate_image"]],
 ] as const) {
   const definitions = featureDefinitions({
     ANTIGRAVITY_DEFER_TOOLS: "1",
@@ -178,4 +150,4 @@ for (const [toggle, expectedNames] of [
   assert.deepEqual(definitions.map((tool) => tool.name), expectedNames);
 }
 
-console.log("extra tools toggle: disables, deferred exposure, hidden declarations passed");
+console.log("extra tools toggle: disables, deferred exposure passed");
