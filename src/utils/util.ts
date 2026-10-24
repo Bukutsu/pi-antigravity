@@ -15,6 +15,25 @@ export function isExtraToolEnabled(tool: "SEARCH" | "IMAGE" | "FETCH"): boolean 
   return antigravityEnv("NO_EXTRA_TOOLS") !== "1" && antigravityEnv(`NO_${tool}_TOOL`) !== "1";
 }
 
+/**
+ * Defer an extra tool and hide its declaration when `ANTIGRAVITY_DEFER_TOOLS=1`.
+ */
+export function configureExtraToolExposure(name: string): {
+  exposure?: "deferred";
+  prepareLoadout?: (loadout: {
+    declared: readonly { name: string }[];
+  }) => { hiddenDeclarations: string[] } | undefined;
+} {
+  if (antigravityEnv("DEFER_TOOLS") !== "1") return {};
+  return {
+    exposure: "deferred",
+    prepareLoadout: ({ declared }) =>
+      declared.some((tool) => tool.name === "tool_search")
+        ? undefined
+        : { hiddenDeclarations: [name] },
+  };
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

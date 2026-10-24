@@ -221,6 +221,7 @@ All primary environment variables start with `ANTIGRAVITY_`. The legacy `NOAGY_`
 | `ANTIGRAVITY_NO_SEARCH_TOOL` | Set to `1` to skip only the `google_search` tool, e.g. when another extension provides web search. |
 | `ANTIGRAVITY_NO_FETCH_TOOL` | Set to `1` to skip only the `read_url_content` tool, e.g. when another extension already fetches URLs. |
 | `ANTIGRAVITY_NO_IMAGE_TOOL` | Set to `1` to skip only the `generate_image` tool. |
+| `ANTIGRAVITY_DEFER_TOOLS` | Set to `1` to register `google_search` and `generate_image` as deferred (hidden from the model, callable from codemode scripts). Needs `codemode` or `tool_search` active, e.g. `"defaultTools": ["+codemode"]`. Requires Pi 0.99.2+; older Pi keeps them direct. |
 | `ANTIGRAVITY_WEB_FETCH_MAX_CHARS` | Character budget for one `read_url_content` result. Defaults to 60000, roughly 15k tokens. |
 
 `pi config` can disable each model-facing tool without disabling the provider. The package loads four extension resources: `src/index.ts` (provider, OAuth, and slash commands), `src/features/google-search.ts` (`google_search`), `src/features/read-url-content.ts` (`read_url_content`), and `src/features/generate-image.ts` (`generate_image`). Turn off a feature resource there to stop registering that tool. `/antigravity.search`, `/antigravity.fetch`, and `/antigravity.image` stay available from the provider extension.
