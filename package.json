@@ -59,6 +59,9 @@
     "@earendil-works/pi-ai": ">=0.80.0",
     "@earendil-works/pi-coding-agent": ">=0.80.0"
   },
+  "resolutions": {
+    "undici": "8.12.2"
+  },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.86.1",
     "@earendil-works/pi-coding-agent": "^0.86.1",
